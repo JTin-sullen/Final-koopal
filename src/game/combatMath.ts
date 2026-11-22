@@ -252,6 +252,75 @@ export function computeCenterFacingCamera(
 }
 
 /**
+ * Computes an angled arena camera with completely unlocked horizontal X-axis and Z-axis tracking
+ * (no pull or inward yaw rotation toward map center 0,0) and a locked vertical Y-axis pitch/height angle.
+ * Fixed yaw = Math.PI faces north (-Z), so screen Left/Right always matches -X/+X everywhere on the map.
+ */
+export function computeFreeHorizontalCamera(
+  playerX: number,
+  playerY: number,
+  playerZ: number,
+  isFlying = false,
+  pitchRad = 0.84,
+  distance = 17.0,
+  isPortrait = false
+): LockedCameraRig {
+  const effectiveDist = (isFlying ? distance + 2.6 : distance) + (isPortrait ? 3.2 : 0);
+  const lookX = playerX;
+  const lookY = playerY + (isFlying ? 1.35 : 1.05);
+  const lookZ = playerZ - (isPortrait ? 0.5 : 0.75);
+  const horiz = Math.cos(pitchRad) * effectiveDist;
+  const vert = Math.sin(pitchRad) * effectiveDist;
+
+  return {
+    camX: lookX,
+    camY: lookY + vert,
+    camZ: lookZ + horiz,
+    lookX,
+    lookY,
+    lookZ,
+    yaw: Math.PI,
+    elevationDeg: (pitchRad * 180) / Math.PI,
+  };
+}
+
+export const STUN_MIN_SEC = 0.35;
+export const STUN_NORMAL_MAX_SEC = 0.75;
+export const STUN_HEAVY_ULT_MAX_SEC = 1.1;
+export const STUN_RECOVERY_IMMUNITY_SEC = 1.35;
+
+/**
+ * Clamps any stun/stagger duration into strict anti-stunlock bounds:
+ * - Normal skills: [0.35s .. 0.75s]
+ * - Heavy Ultimates: [0.35s .. 1.10s]
+ */
+export function resolveCappedStunDuration(rawSec: number, isHeavyUltimate = false): number {
+  const maxAllowed = isHeavyUltimate ? STUN_HEAVY_ULT_MAX_SEC : STUN_NORMAL_MAX_SEC;
+  const safe = Number.isFinite(rawSec) ? rawSec : STUN_MIN_SEC;
+  return Math.max(STUN_MIN_SEC, Math.min(maxAllowed, safe));
+}
+
+/**
+ * Returns true only when a fighter is outside their post-stun recovery immunity window.
+ */
+export function canApplyStun(stunImmunityTimer = 0): boolean {
+  return (stunImmunityTimer ?? 0) <= 0.001;
+}
+
+/**
+ * Computes responsive scale factor [0.76 .. 1.18] for HUD controls & joysticks based on viewport size.
+ */
+export function computeHudScale(
+  viewportW: number,
+  viewportH: number,
+  isCoarsePointer = false
+): number {
+  const minDim = Math.max(240, Math.min(viewportW, viewportH));
+  const raw = minDim / (isCoarsePointer ? 430 : 780);
+  return Number(Math.max(0.76, Math.min(1.18, raw)).toFixed(3));
+}
+
+/**
  * Exponential frame-rate independent camera damping factor: 1 - exp(-stiffness * dt).
  */
 export function computeCameraDampFactor(dt: number, stiffness = 14): number {

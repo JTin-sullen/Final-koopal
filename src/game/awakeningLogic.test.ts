@@ -318,6 +318,11 @@ function makeActor(id: string, fighterId: FighterId, slotIndex: number, isBot = 
     channelTargetX: 0,
     channelTargetZ: 0,
     stunnedTimer: 0,
+    stunImmunityTimer: 0,
+    domainGauge: 0,
+    deaths: 0,
+    domainJackpotActive: false,
+    domainJackpotHits: 0,
   };
 }
 

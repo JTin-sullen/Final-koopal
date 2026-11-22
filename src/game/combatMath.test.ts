@@ -5,11 +5,14 @@ import { WebSocketServer, WebSocket as WsClient } from 'ws';
 import {
   advanceActionTimer,
   applyObstacleDamage,
+  canApplyStun,
   computeAwakeningOrbCountdownSec,
   computeCenterFacingCamera,
   computeConeForwardVector,
   computeContactShadowTransform,
   computeCountdownStep,
+  computeFreeHorizontalCamera,
+  computeHudScale,
   computeLockedTopDownCamera,
   computeObstacleCameraPullIn,
   computeStormRadiusAtTime,
@@ -24,6 +27,7 @@ import {
   projectToMinimapPercent,
   reconcilePredictedPosition,
   recordFrameTime,
+  resolveCappedStunDuration,
   resolveProjectileHitRadius,
   sanitizeChatText,
   selectNearestTarget,
@@ -33,6 +37,9 @@ import {
   shouldThrottleUpdate,
   stepHorizontalVelocity,
   stepHomingProjectileVelocity,
+  STUN_HEAVY_ULT_MAX_SEC,
+  STUN_MIN_SEC,
+  STUN_NORMAL_MAX_SEC,
 } from './combatMath.ts';
 import { LocalRoomSession } from './localRoomClient.ts';
 import {
@@ -945,5 +952,41 @@ test('Damen base High Noon Fan and Awakened abilities never one-shot a target in
     session.dispose();
   }
 });
+
+test('computeFreeHorizontalCamera tracks horizontal X freely without pulling toward center while keeping Y pitch locked', () => {
+  const left = computeFreeHorizontalCamera(-25, 0, -6, false);
+  const right = computeFreeHorizontalCamera(25, 0, -6, false);
+  assert.equal(left.yaw, Math.PI);
+  assert.equal(right.yaw, Math.PI);
+  assert.equal(left.lookX, -25);
+  assert.equal(left.camX, -25);
+  assert.equal(right.lookX, 25);
+  assert.equal(right.camX, 25);
+  // Vertical elevation & pitch offset stay strictly locked regardless of X position
+  assert.equal(left.camY, right.camY);
+  assert.equal(left.lookY, right.lookY);
+  assert.equal(left.elevationDeg, right.elevationDeg);
+});
+
+test('global stun caps (0.35-0.75s normal, 1.1s ult max), recovery stun immunity, HUD scaling, and Marjohn buffs', () => {
+  assert.equal(resolveCappedStunDuration(0.1, false), STUN_MIN_SEC);
+  assert.equal(resolveCappedStunDuration(2.5, false), STUN_NORMAL_MAX_SEC);
+  assert.equal(resolveCappedStunDuration(2.5, true), STUN_HEAVY_ULT_MAX_SEC);
+  assert.equal(canApplyStun(0), true);
+  assert.equal(canApplyStun(0.8), false);
+
+  const mobileScale = computeHudScale(390, 844, true);
+  const desktopScale = computeHudScale(1280, 720, false);
+  const largeScale = computeHudScale(1920, 1080, false);
+  assert.ok(mobileScale >= 0.76 && mobileScale <= 1.18);
+  assert.ok(desktopScale >= 0.76 && desktopScale <= 1.18);
+  assert.ok(largeScale >= desktopScale);
+
+  // Marjohn buffed wind blade base damage (14) and upgraded skills
+  assert.ok(FIGHTER_BY_ID.marjohn.abilities[0].damage >= 14);
+  assert.ok(FIGHTER_BY_ID.marjohn.abilities[2].damage >= 23);
+  assert.ok(FIGHTER_BY_ID.marjohn.abilities[4].damage >= 42);
+});
+
 
 

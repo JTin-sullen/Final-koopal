@@ -13,6 +13,7 @@ import type {
   ClashState,
   CombatEvent,
   FighterId,
+  GameModeId,
   HeadlockState,
   KoCause,
   MapId,
@@ -33,9 +34,11 @@ import {
   resolveObstacleCollisions,
 } from '../shared/gameData.ts';
 import {
+  canApplyStun,
   findBestEnemyClusterTarget,
   isPointInBeamCorridor,
   isPointInFanCone,
+  resolveCappedStunDuration,
 } from '../game/combatMath.ts';
 import type { ClashTugState } from '../game/awakeningLogic.ts';
 import {
@@ -46,6 +49,11 @@ import {
   shouldSpawnAwakeningOrbs,
   stepClashTugOfWar,
 } from '../game/awakeningLogic.ts';
+import { addDomainCharge, areActorsAllied } from '../game/domainLogic.ts';
+import {
+  resolveJmAwakenedSlot6Variant,
+  resolveSkyAutoComboOutcome,
+} from '../game/jmComboLogic.ts';
 
 export interface AwakeningActor extends ArenaActorState {
   moveX: number;
@@ -109,6 +117,10 @@ export interface AwakeningActor extends ArenaActorState {
   channelTargetX: number;
   channelTargetZ: number;
   stunnedTimer: number;
+  skyComboPrompt?: boolean;
+  skyComboStep?: number;
+  skyComboMashes?: number;
+  skyComboTargetId?: string | null;
 }
 
 export interface AwakeningRoomState {
@@ -158,6 +170,8 @@ export interface AwakeningRoomState {
     remaining: number;
     run: () => void;
   }>;
+  activeDomain?: { ownerId: string; fighterId: FighterId } | null;
+  gameMode?: GameModeId;
 }
 
 export interface AwakeningHostHelpers {
@@ -259,13 +273,19 @@ function normalizeAng(a: number): number {
   return r;
 }
 
-export function applyDirectStun(target: AwakeningActor, durationSec: number): void {
+export function applyDirectStun(
+  target: AwakeningActor,
+  durationSec: number,
+  isHeavyUltimate = false
+): void {
   if (target.isKO || target.actionState === 'clash') return;
+  if (!canApplyStun(target.stunImmunityTimer)) return;
+  const capped = resolveCappedStunDuration(durationSec, isHeavyUltimate);
   target.isStunned = true;
-  target.stunnedTimer = Math.max(target.stunnedTimer, durationSec);
+  target.stunnedTimer = Math.max(target.stunnedTimer, capped);
   target.actionState = 'stagger';
-  target.actionTimer = Math.max(target.actionTimer, durationSec);
-  target.actionDuration = Math.max(target.actionDuration, durationSec);
+  target.actionTimer = Math.max(target.actionTimer, capped);
+  target.actionDuration = Math.max(target.actionDuration, capped);
   target.shieldActive = false;
   target.parryWindow = false;
   target.blockHeld = false;
@@ -497,6 +517,50 @@ export function cancelCutsceneGracefully(
   });
 }
 
+export function skipCutsceneToClash(
+  room: AwakeningRoomState,
+  helpers: AwakeningHostHelpers
+): void {
+  const cs = room.awakeningCutscene;
+  if (!cs || cs.resolved) return;
+  const clashStart = AWAKENING_CONFIG.TIMELINE.CLASH_START_AT;
+  if (cs.clockSec >= clashStart) return;
+
+  cs.clockSec = clashStart;
+  cs.hasSyncedAudio = false;
+  cs.lastAudioSyncAt = Date.now();
+  cs.tug = createClashTugState();
+  cs.clashBalance = 0;
+  cs.p1Taps = 0;
+  cs.p2Taps = 0;
+
+  const p1 = room.actors.find((a) => a.playerId === cs.p1Id);
+  const p2 = room.actors.find((a) => a.playerId === cs.p2Id);
+  const sepHalf = AWAKENING_CONFIG.CLASH_SEPARATION_DISTANCE * 0.5;
+  if (p1) {
+    p1.x = -sepHalf;
+    p1.z = 0;
+    p1.rotY = Math.PI * 0.5;
+    p1.actionState = 'ultimate';
+    p1.vx = 0;
+  }
+  if (p2) {
+    p2.x = sepHalf;
+    p2.z = 0;
+    p2.rotY = -Math.PI * 0.5;
+    p2.actionState = 'ultimate';
+    p2.vx = 0;
+  }
+  helpers.pushEvent(room, {
+    kind: 'shockwave',
+    x: 0,
+    y: 1.4,
+    z: 0,
+    colorHex: 0xfacc15,
+    callout: 'SKIP TO CLASH DUEL — MASH NOW!',
+  });
+}
+
 export function resolveCutsceneClash(
   room: AwakeningRoomState,
   helpers: AwakeningHostHelpers,
@@ -563,12 +627,14 @@ export function resolveCutsceneClash(
     const winner = outcome === 'p1' ? p1 : p2;
     const loser = outcome === 'p1' ? p2 : p1;
     const dirX = loser.x >= winner.x ? 1 : -1;
-    const dmg = Math.max(AWAKENING_CONFIG.CLASH_DAMAGE, Math.round(loser.maxHp * 0.16));
+    const dmg = AWAKENING_CONFIG.CLASH_DAMAGE;
+    const loserStun = resolveCappedStunDuration(0.72, false);
 
     winner.actionState = 'idle';
     winner.actionTimer = 0;
     winner.iframeTimer = 0.35;
     winner.damageDealt += dmg;
+    winner.domainGauge = addDomainCharge(winner.domainGauge ?? 0, 50);
 
     loser.hp = Math.max(0, loser.hp - dmg);
     loser.damagePhase = getDamagePhase(loser.hp, loser.maxHp, loser.isKO);
@@ -578,8 +644,8 @@ export function resolveCutsceneClash(
     loser.yVel = AWAKENING_CONFIG.CLASH_UPWARD_VEL;
     loser.grounded = false;
     loser.actionState = 'stagger';
-    loser.actionTimer = 0.72;
-    loser.actionDuration = 0.72;
+    loser.actionTimer = loserStun;
+    loser.actionDuration = loserStun;
 
     helpers.pushEvent(room, {
       kind: 'awakeningClashEnd',
@@ -594,7 +660,7 @@ export function resolveCutsceneClash(
       colorHex: AWAKENING_CONFIG.AWAKENED_KITS[winner.fighterId].auraPrimaryHex,
       damage: dmg,
       hitStopMs: AWAKENING_CONFIG.CLASH_HITSTOP_MS,
-      callout: `${winner.name.toUpperCase()} OVERPOWERS!`,
+      callout: `${winner.name.toUpperCase()} OVERPOWERS! +50% DOMAIN`,
     });
 
     if (loser.hp <= 0) {
@@ -932,6 +998,12 @@ export function handleAwakeningDebug(
     room.matchTime = 89.0;
     return;
   }
+  if (action === 'fillDomain') {
+    if (p1) {
+      p1.domainGauge = 100;
+    }
+    return;
+  }
   if (action === 'resetCooldowns') {
     for (const a of room.actors) {
       for (let i = 0; i < a.cooldowns.length; i++) a.cooldowns[i] = 0;
@@ -942,6 +1014,7 @@ export function handleAwakeningDebug(
       a.mana = a.maxMana;
       a.stamina = a.maxStamina;
       a.silencedTimer = 0;
+      a.stunImmunityTimer = 0;
     }
   }
 }
@@ -1016,8 +1089,13 @@ export function setupAwakenedAbilityWindup(
   }
 
   actor.actionState = slot >= 4 ? 'ultimate' : 'skill';
-  actor.actionDuration = ab.duration;
-  actor.actionTimer = ab.duration;
+  const jmSanctuaryFastCharge =
+    actor.fighterId === 'jm' &&
+    slot === 6 &&
+    room.activeDomain?.ownerId === actor.playerId &&
+    room.activeDomain.fighterId === 'jm';
+  actor.actionDuration = jmSanctuaryFastCharge ? Math.max(0.28, ab.duration * 0.5) : ab.duration;
+  actor.actionTimer = actor.actionDuration;
 
   if (actor.fighterId === 'marjohn') {
     if (slot === 2) {
@@ -1095,7 +1173,14 @@ export function setupAwakenedAbilityWindup(
     } else if (slot === 4) {
       helpers.spawnTelegraph(room, actor, 'line', actor.x, 0, actor.z, castDirX, castDirZ, ab.aimRadius ?? 3.0, ab.range, 0, ab.windup, specColor);
     } else if (slot === 6) {
-      helpers.spawnTelegraph(room, actor, 'line', actor.x, 0, actor.z, castDirX, castDirZ, AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE, 0, ab.windup, specColor);
+      const slot6Mode = resolveJmAwakenedSlot6Variant(actor.isFlying);
+      if (slot6Mode === 'super_kamehameha') {
+        const windupSec =
+          room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'jm'
+            ? Math.max(0.12, ab.windup * 0.5)
+            : ab.windup;
+        helpers.spawnTelegraph(room, actor, 'line', actor.x, 0, actor.z, castDirX, castDirZ, AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE, 0, windupSec, specColor);
+      }
     }
   }
 
@@ -1527,6 +1612,7 @@ export function executeAwakenedAbilityImpact(
           originY: actor.y + 1.15,
           originZ: actor.z,
           isOverdrive: true,
+          isHoming: room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen',
           age: 0,
           maxAge: 0.52,
           maxRange: AWAKENING_CONFIG.DAMEN_TRACER_RANGE,
@@ -1563,6 +1649,7 @@ export function executeAwakenedAbilityImpact(
           originY: actor.y + 1.1,
           originZ: actor.z,
           isOverdrive: true,
+          isHoming: room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen',
           age: 0,
           maxAge: 0.45,
           maxRange: 11.0,
@@ -1643,6 +1730,7 @@ export function executeAwakenedAbilityImpact(
           originY: actor.y + 1.15,
           originZ: actor.z,
           isOverdrive: true,
+          isHoming: room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen',
           age: 0,
           maxAge: 0.56,
           maxRange: 15.5,
@@ -1920,7 +2008,7 @@ export function executeAwakenedAbilityImpact(
   // ====================== 5. JM (Celestial Dragon Ascendant) ======================
   if (actor.fighterId === 'jm') {
     if (slot === 0) {
-      // Ascendant 4-Hit: golden waves on every hit, twin rapid bolts when flying
+      // Ascendant 4-Hit: crescent golden-cyan slashes + mini Kamehameha waves; twin rapid bolts when flying
       if (actor.isFlying) {
         for (const off of [-0.08, 0.08]) {
           const ang = actor.rotY + off;
@@ -1955,6 +2043,21 @@ export function executeAwakenedAbilityImpact(
       }
 
       const isFinisher = actor.comboStep === 4;
+      helpers.pushEvent(room, {
+        kind: 'crescentSlash',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 0.75,
+        y: actor.y + 1.05,
+        z: actor.z + fz * 0.75,
+        dirX: fx,
+        dirZ: fz,
+        radius: isFinisher ? 2.6 : 1.9,
+        colorHex: actor.comboStep % 2 === 0 ? 0x38bdf8 : 0xfef08a,
+        abilitySlot: 0,
+        comboStep: actor.comboStep as 1 | 2 | 3 | 4,
+      });
+
       // Every ground swing fires a fast small Kamehameha wave forward!
       room.projectiles.push({
         id: helpers.makeId('proj'),
@@ -1977,26 +2080,27 @@ export function executeAwakenedAbilityImpact(
         maxRange: isFinisher ? 8.8 : 6.2,
         damage: ab.damage + (isFinisher ? 4 : 0),
         staggerDamage: ab.staggerDamage,
-        knockback: isFinisher ? ab.knockback * 2.2 : ab.knockback,
+        knockback: isFinisher ? ab.knockback * 2.0 : ab.knockback,
         hitIds: new Set(),
       });
       if (isFinisher) {
-        // 4th hit Super Dash Punch: close-range shockwave lunge knocking enemies back
-        helpers.damageObstaclesInArea(room, actor.x + fx * 1.5, actor.z + fz * 1.5, 3.2, 26, 0xfef08a);
+        // 4th hit Super Dash Punch: close-range crater + jagged spike crown knocking enemies back
+        helpers.damageObstaclesInArea(room, actor.x + fx * 1.5, actor.z + fz * 1.5, 3.4, 26, 0xfef08a);
         helpers.pushEvent(room, {
-          kind: 'shockwave',
+          kind: 'craterSlam',
           attackerId: actor.playerId,
           fighterId: 'jm',
-          x: actor.x + fx * 1.1,
-          y: actor.y + 0.9,
-          z: actor.z + fz * 1.1,
+          x: actor.x + fx * 1.2,
+          y: actor.y + 0.3,
+          z: actor.z + fz * 1.2,
           dirX: fx,
           dirZ: fz,
-          radius: 3.4,
+          radius: 3.6,
           colorHex: 0xfef08a,
           abilitySlot: 0,
           comboStep: 4,
           m1Variant: 'heavy',
+          isCounter: true,
           callout: 'SUPER DASH PUNCH!',
         });
         for (const t of room.actors) {
@@ -2004,9 +2108,9 @@ export function executeAwakenedAbilityImpact(
           const dx = t.x - actor.x;
           const dz = t.z - actor.z;
           const d = Math.hypot(dx, dz);
-          if (d <= 3.4 && Math.abs(t.y - actor.y) <= 2.6) {
+          if (d <= 3.5 && Math.abs(t.y - actor.y) <= 2.6) {
             const calc = helpers.computeDynamicDamage(actor, t, ab.damage * 0.75, 0);
-            if (helpers.applyHit(room, actor, t, calc.dmg, 24, ab.knockback * 2.3, d > 0.05 ? dx / d : fx, d > 0.05 ? dz / d : fz, 0xfef08a, true, false, false, true, calc.isBackstab)) {
+            if (helpers.applyHit(room, actor, t, calc.dmg, 24, ab.knockback * 2.1, d > 0.05 ? dx / d : fx, d > 0.05 ? dz / d : fz, 0xfef08a, true, false, false, true, calc.isBackstab)) {
               actor.landedCurrentAction = true;
             }
           }
@@ -2016,7 +2120,10 @@ export function executeAwakenedAbilityImpact(
       return;
     }
     if (slot === 2) {
-      // Instant Transmission Palm: teleport directly behind nearest/targeted enemy + point-blank shockwave
+      // Instant Transmission Palm: vanish in lightning, appear behind foe with crater palm stun (near-zero knockback for combos!)
+      const originX = actor.x;
+      const originY = actor.y;
+      const originZ = actor.z;
       const tgt = helpers.findPreferredTarget(room, actor, 18.0);
       if (tgt) {
         const tFwdX = Math.sin(tgt.rotY);
@@ -2036,16 +2143,33 @@ export function executeAwakenedAbilityImpact(
       const pfx = Math.sin(actor.rotY);
       const pfz = Math.cos(actor.rotY);
       helpers.pushEvent(room, {
-        kind: 'shockwave',
+        kind: 'dash',
         attackerId: actor.playerId,
         fighterId: 'jm',
-        x: actor.x + pfx * 1.0,
+        x: actor.x,
         y: actor.y + 1.0,
-        z: actor.z + pfz * 1.0,
-        radius: 4.0,
+        z: actor.z,
+        originX,
+        originY: originY + 1.0,
+        originZ,
+        dirX: pfx,
+        dirZ: pfz,
+        colorHex: 0x38bdf8,
+        abilitySlot: 2,
+      });
+      helpers.pushEvent(room, {
+        kind: 'craterSlam',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + pfx * 0.9,
+        y: actor.y + 0.3,
+        z: actor.z + pfz * 0.9,
+        dirX: pfx,
+        dirZ: pfz,
+        radius: 3.8,
         colorHex: 0xfef08a,
         abilitySlot: 2,
-        hitStopMs: 60,
+        hitStopMs: 65,
         callout: 'INSTANT TRANSMISSION!',
       });
       for (const t of room.actors) {
@@ -2053,7 +2177,10 @@ export function executeAwakenedAbilityImpact(
         const d = Math.hypot(t.x - actor.x, t.z - actor.z);
         if (d <= 4.0) {
           const calc = helpers.computeDynamicDamage(actor, t, ab.damage, 2);
-          if (helpers.applyHit(room, actor, t, calc.dmg, ab.staggerDamage, ab.knockback, pfx, pfz, 0xfef08a, true, false, false, true, true)) {
+          if (helpers.applyHit(room, actor, t, calc.dmg, ab.staggerDamage, 0.4, pfx, pfz, 0xfef08a, true, false, false, true, true)) {
+            applyDirectStun(t, 0.72, false);
+            t.vx = 0;
+            t.vz = 0;
             actor.landedCurrentAction = true;
           }
         }
@@ -2061,31 +2188,33 @@ export function executeAwakenedAbilityImpact(
       return;
     }
     if (slot === 3) {
-      // Divine Sanctuary Nova: Slam 1 erupts crystalline ice-light pillars + Chi burst -> Slam 2 follow-up shockwave!
+      // Divine Sanctuary Nova: Slam 1 erupts 10 towering golden-cyan pillars + suspends hit foes mid-air -> Slam 2 spikes them down at crosshair!
       const rad = AWAKENING_CONFIG.JM_DIVINE_NOVA_RADIUS;
       actor.mana = clamp(actor.mana + AWAKENING_CONFIG.JM_DIVINE_NOVA_CHI_GAIN, 0, actor.maxMana);
-      helpers.spawnZone(room, actor, 'icePillarNova', actor.x, 0, actor.z, rad, 2.5, 0x38bdf8);
+      helpers.spawnZone(room, actor, 'icePillarNova', actor.x, 0, actor.z, rad, 2.2, 0x38bdf8);
       helpers.damageObstaclesInArea(room, actor.x, actor.z, rad, 45, 0x38bdf8);
       helpers.pushEvent(room, {
-        kind: 'shockwave',
+        kind: 'craterSlam',
         attackerId: actor.playerId,
         fighterId: 'jm',
         x: actor.x,
-        y: actor.y + 0.25,
+        y: actor.y + 0.3,
         z: actor.z,
         radius: rad,
         colorHex: 0x38bdf8,
         abilitySlot: 3,
+        isCounter: true,
         hitStopMs: 55,
-        callout: 'DIVINE SANCTUARY: ICE PILLARS!',
+        callout: 'DIVINE SANCTUARY: SKY PILLARS!',
       });
       for (const t of room.actors) {
         if (t.playerId === actor.playerId || t.isKO) continue;
         const d = Math.hypot(t.x - actor.x, t.z - actor.z);
         if (d <= rad) {
           const calc = helpers.computeDynamicDamage(actor, t, ab.damage * 0.52, 3);
-          if (helpers.applyHit(room, actor, t, calc.dmg, 20, ab.knockback * 0.7, d > 0.05 ? (t.x - actor.x) / d : fx, d > 0.05 ? (t.z - actor.z) / d : fz, 0x38bdf8, true)) {
-            t.yVel = Math.max(t.yVel, 7.2);
+          if (helpers.applyHit(room, actor, t, calc.dmg, 20, 1.5, d > 0.05 ? (t.x - actor.x) / d : fx, d > 0.05 ? (t.z - actor.z) / d : fz, 0x38bdf8, true)) {
+            t.y = Math.max(t.y, getMapTerrainHeight(room.mapId, t.x, t.z) + 2.4);
+            t.yVel = 4.2;
             t.grounded = false;
             actor.landedCurrentAction = true;
           }
@@ -2102,7 +2231,7 @@ export function executeAwakenedAbilityImpact(
       return;
     }
     if (slot === 4) {
-      // Empowered Solar Dragon Beam
+      // Solar Dragon Beam Sky Auto-Combo!
       helpers.pushEvent(room, {
         kind: 'beam',
         attackerId: actor.playerId,
@@ -2113,10 +2242,24 @@ export function executeAwakenedAbilityImpact(
         dirX: fx,
         dirZ: fz,
         colorHex: 0xfef08a,
-        hitStopMs: 95,
+        hitStopMs: 85,
         abilitySlot: 4,
-        callout: 'SOLAR DRAGON BEAM+',
+        callout: 'SOLAR DRAGON BEAM!',
       });
+      helpers.pushEvent(room, {
+        kind: 'trenchPulse',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 1.1,
+        y: actor.y + 0.3,
+        z: actor.z + fz * 1.1,
+        dirX: fx,
+        dirZ: fz,
+        radius: ab.range,
+        colorHex: 0xfef08a,
+        abilitySlot: 4,
+      });
+      let firstSkyTarget: AwakeningActor | null = null;
       for (const t of room.actors) {
         if (t.playerId === actor.playerId || t.isKO) continue;
         const dx = t.x - actor.x;
@@ -2124,38 +2267,108 @@ export function executeAwakenedAbilityImpact(
         const along = dx * fx + dz * fz;
         const perp = Math.abs(dx * -fz + dz * fx);
         if (along > 0 && along <= ab.range && perp <= 2.9 && Math.abs(t.y - actor.y) <= (actor.isFlying ? 9.5 : 3.2)) {
-          const calc = helpers.computeDynamicDamage(actor, t, ab.damage, 4);
-          if (helpers.applyHit(room, actor, t, calc.dmg, ab.staggerDamage, ab.knockback, fx, fz, 0xfef08a, true, false, true, calc.isCrit, calc.isBackstab)) {
+          const calc = helpers.computeDynamicDamage(actor, t, ab.damage * 0.72, 4);
+          if (helpers.applyHit(room, actor, t, calc.dmg, ab.staggerDamage, actor.isFlying ? 12.0 : 2.5, fx, fz, 0xfef08a, true, false, true, calc.isCrit, calc.isBackstab)) {
             actor.landedCurrentAction = true;
+            if (!firstSkyTarget && !t.isKO) {
+              firstSkyTarget = t;
+            }
           }
         }
+      }
+      if (firstSkyTarget && !actor.isFlying) {
+        // Cancel beam end-lag, dash to target, launch into Skyward Uppercut!
+        const destX = firstSkyTarget.x - fx * 1.35;
+        const destZ = firstSkyTarget.z - fz * 1.35;
+        const safe = resolveObstacleCollisions(room.mapId, destX, actor.y, destZ, 0.48, room.obstacles);
+        actor.x = safe.x;
+        actor.z = safe.z;
+        actor.rotY = Math.atan2(firstSkyTarget.x - actor.x, firstSkyTarget.z - actor.z);
+        actor.channelKind = 'jm_sky_uppercut';
+        actor.channelDuration = 0.38;
+        actor.channelTimer = 0.38;
+        actor.channelTickTimer = 0.1;
+        actor.channelStep = 0;
+        actor.channelTargetX = firstSkyTarget.x;
+        actor.channelTargetZ = firstSkyTarget.z;
+        actor.actionTimer = 0.38;
+        actor.superArmor = true;
+        actor.iframeTimer = Math.max(actor.iframeTimer, 0.5);
+        actor.skyComboTargetId = firstSkyTarget.playerId;
+        actor.skyComboMashes = 0;
+        actor.skyComboStep = 0;
+        actor.skyComboPrompt = false;
+        firstSkyTarget.vx = 0;
+        firstSkyTarget.vz = 0;
+        applyDirectStun(firstSkyTarget, 1.1, true);
+        helpers.pushEvent(room, {
+          kind: 'skyComboStep',
+          attackerId: actor.playerId,
+          targetId: firstSkyTarget.playerId,
+          fighterId: 'jm',
+          x: firstSkyTarget.x,
+          y: firstSkyTarget.y + 1.2,
+          z: firstSkyTarget.z,
+          dirX: fx,
+          dirZ: fz,
+          colorHex: 0xfef08a,
+          abilitySlot: 4,
+          comboStep: 1,
+          callout: 'SKYWARD UPPERCUT!',
+        });
       }
       return;
     }
     if (slot === 6) {
-      // Super Kamehameha: Colossal Golden-Blue beam continuously firing for 5 FULL SECONDS, steerable, stunning enemies inside!
-      const dur = AWAKENING_CONFIG.JM_KAMEHAMEHA_DURATION;
-      actor.channelKind = 'jm_kamehameha';
-      actor.channelDuration = dur;
-      actor.channelTimer = dur;
-      actor.channelTickTimer = 0.01;
+      const slot6Mode = resolveJmAwakenedSlot6Variant(actor.isFlying);
+      if (slot6Mode === 'celestial_barrage') {
+        // Airborne Slot 6: Celestial Barrage (Energy-Ball Machine Gun while hovering in Sky Flight!)
+        const dur = AWAKENING_CONFIG.JM_AIR_BARRAGE_DURATION;
+        actor.channelKind = 'jm_air_barrage';
+        actor.channelDuration = dur;
+        actor.channelTimer = dur;
+        actor.channelTickTimer = 0.01;
+        actor.channelStep = 0;
+        actor.channelTargetX = aimPt.x;
+        actor.channelTargetZ = aimPt.z;
+        helpers.pushEvent(room, {
+          kind: 'chargeAura',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x,
+          y: actor.y + 1.2,
+          z: actor.z,
+          radius: 3.4,
+          colorHex: 0x38bdf8,
+          abilitySlot: 6,
+          callout: 'CELESTIAL BARRAGE!',
+        });
+        actor.landedCurrentAction = true;
+        return;
+      }
+
+      // Grounded Slot 6: 0.4s charge-up -> 5.0s Steerable V-Trench Super Kamehameha!
+      const chargeDur = AWAKENING_CONFIG.JM_KAMEHAMEHA_CHARGE_SEC;
+      actor.channelKind = 'jm_kamehameha_charge';
+      actor.channelDuration = chargeDur;
+      actor.channelTimer = chargeDur;
+      actor.channelTickTimer = 0.05;
       actor.channelStep = 0;
       actor.channelTargetX = actor.x + fx * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
       actor.channelTargetZ = actor.z + fz * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
       helpers.pushEvent(room, {
-        kind: 'beam',
+        kind: 'chargeAura',
         attackerId: actor.playerId,
         fighterId: 'jm',
-        x: actor.x + fx * 1.2,
-        y: actor.y + 1.3,
-        z: actor.z + fz * 1.2,
+        x: actor.x + fx * 0.85,
+        y: actor.y + 1.2,
+        z: actor.z + fz * 0.85,
         dirX: fx,
         dirZ: fz,
-        radius: AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH,
-        colorHex: 0x38bdf8,
-        hitStopMs: 110,
+        radius: 4.5,
+        colorHex: 0xfef08a,
         abilitySlot: 6,
-        callout: 'SUPER KAMEHAMEHA!',
+        callout: 'KAMEHAMEHA... CHARGE!',
       });
       actor.landedCurrentAction = true;
       return;
@@ -2172,6 +2385,8 @@ export function tickAwakenedChannel(
   if (!actor.channelKind || actor.isKO) {
     actor.channelKind = null;
     actor.channelTimer = 0;
+    actor.skyComboPrompt = false;
+    actor.skyComboTargetId = null;
     return;
   }
 
@@ -2179,10 +2394,15 @@ export function tickAwakenedChannel(
   actor.channelTimer = Math.max(0, actor.channelTimer - dt);
   actor.channelTickTimer -= dt;
 
-  // Steering logic for beam / gun-fan ultimates
-  if (kind === 'jm_kamehameha' || kind === 'damen_arsenal') {
-    const steerRate = kind === 'jm_kamehameha' ? 1.35 : 1.6;
-    if (Math.abs(actor.moveX) > 0.08 || Math.abs(actor.moveZ) > 0.08) {
+  // Steering logic for beam / barrage / gun-fan ultimates
+  if (
+    kind === 'jm_kamehameha_charge' ||
+    kind === 'jm_kamehameha' ||
+    kind === 'jm_air_barrage' ||
+    kind === 'damen_arsenal'
+  ) {
+    const steerRate = kind === 'jm_kamehameha' ? 1.35 : kind === 'jm_kamehameha_charge' ? 2.4 : 1.85;
+    if (kind !== 'jm_air_barrage' && (Math.abs(actor.moveX) > 0.08 || Math.abs(actor.moveZ) > 0.08)) {
       const targetYaw = Math.atan2(actor.moveX, actor.moveZ);
       const diff = normalizeAng(targetYaw - actor.rotY);
       const maxStep = steerRate * dt;
@@ -2196,11 +2416,59 @@ export function tickAwakenedChannel(
     }
     const rfx = Math.sin(actor.rotY);
     const rfz = Math.cos(actor.rotY);
-    actor.channelTargetX = actor.x + rfx * 24.0;
-    actor.channelTargetZ = actor.z + rfz * 24.0;
+    if (kind !== 'jm_air_barrage') {
+      actor.channelTargetX = actor.x + rfx * 24.0;
+      actor.channelTargetZ = actor.z + rfz * 24.0;
+    } else if (actor.pendingAimX !== null && actor.pendingAimZ !== null) {
+      actor.channelTargetX = actor.pendingAimX;
+      actor.channelTargetZ = actor.pendingAimZ;
+    }
   }
 
-  if (kind === 'jm_kamehameha') {
+  if (kind === 'jm_kamehameha_charge') {
+    if (actor.channelTimer <= 0) {
+      const fx = Math.sin(actor.rotY);
+      const fz = Math.cos(actor.rotY);
+      const dur = AWAKENING_CONFIG.JM_KAMEHAMEHA_DURATION;
+      actor.channelKind = 'jm_kamehameha';
+      actor.channelDuration = dur;
+      actor.channelTimer = dur;
+      actor.channelTickTimer = 0.01;
+      actor.channelStep = 0;
+      actor.channelTargetX = actor.x + fx * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
+      actor.channelTargetZ = actor.z + fz * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
+      actor.actionTimer = Math.max(actor.actionTimer, dur);
+      helpers.pushEvent(room, {
+        kind: 'beam',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 1.2,
+        y: actor.y + 1.3,
+        z: actor.z + fz * 1.2,
+        dirX: fx,
+        dirZ: fz,
+        radius: AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH,
+        colorHex: 0x38bdf8,
+        hitStopMs: 95,
+        abilitySlot: 6,
+        callout: 'SUPER KAMEHAMEHA!',
+      });
+      helpers.pushEvent(room, {
+        kind: 'trenchPulse',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 1.2,
+        y: actor.y + 0.3,
+        z: actor.z + fz * 1.2,
+        dirX: fx,
+        dirZ: fz,
+        radius: AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE,
+        colorHex: 0x38bdf8,
+        abilitySlot: 6,
+      });
+      return;
+    }
+  } else if (kind === 'jm_kamehameha') {
     const fx = Math.sin(actor.rotY);
     const fz = Math.cos(actor.rotY);
     const range = AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
@@ -2208,6 +2476,21 @@ export function tickAwakenedChannel(
     if (actor.channelTickTimer <= 0) {
       actor.channelTickTimer = 0.2;
       actor.channelStep += 1;
+      if (actor.channelStep % 2 === 0) {
+        helpers.pushEvent(room, {
+          kind: 'trenchPulse',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x + fx * 1.2,
+          y: actor.y + 0.3,
+          z: actor.z + fz * 1.2,
+          dirX: fx,
+          dirZ: fz,
+          radius: range,
+          colorHex: 0x38bdf8,
+          abilitySlot: 6,
+        });
+      }
       for (const obs of room.obstacles) {
         if (obs.destroyed || !obs.destructible) continue;
         if (isPointInBeamCorridor(obs.x, obs.z, actor.x, actor.z, fx, fz, range, width + Math.max(obs.halfW, obs.halfD))) {
@@ -2219,24 +2502,92 @@ export function tickAwakenedChannel(
         if (isPointInBeamCorridor(t.x, t.z, actor.x, actor.z, fx, fz, range, width)) {
           const calc = helpers.computeDynamicDamage(actor, t, 5, 6);
           if (helpers.applyHit(room, actor, t, calc.dmg, 8, 1.5, fx, fz, 0x38bdf8, false, false, true, true, calc.isBackstab)) {
-            applyDirectStun(t, 0.45);
+            applyDirectStun(t, 0.45, true);
             actor.landedCurrentAction = true;
           }
         }
       }
     }
-  } else if (kind === 'jm_nova_slam') {
-    if (actor.channelTimer <= 0) {
-      const rad = AWAKENING_CONFIG.JM_DIVINE_NOVA_RADIUS + 0.6;
+  } else if (kind === 'jm_air_barrage') {
+    if (actor.channelTickTimer <= 0) {
+      actor.channelTickTimer = AWAKENING_CONFIG.JM_AIR_BARRAGE_INTERVAL;
+      actor.channelStep += 1;
       const fx = Math.sin(actor.rotY);
       const fz = Math.cos(actor.rotY);
+      let aimX = actor.pendingAimX ?? actor.x + fx * 8.5;
+      let aimZ = actor.pendingAimZ ?? actor.z + fz * 8.5;
+      const tgt = helpers.findPreferredTarget(room, actor, 24.0);
+      if (tgt && actor.pendingAimX === null) {
+        aimX = tgt.x;
+        aimZ = tgt.z;
+      }
+      const jitterX = Math.sin(actor.channelStep * 2.3) * 1.15;
+      const jitterZ = Math.cos(actor.channelStep * 1.9) * 1.15;
+      const tx = aimX + jitterX;
+      const tz = aimZ + jitterZ;
+      const ty = getMapTerrainHeight(room.mapId, tx, tz) + 0.65;
+      const dx = tx - actor.x;
+      const dy = ty - (actor.y + 1.1);
+      const dz = tz - actor.z;
+      const len = Math.max(0.01, Math.hypot(dx, dy, dz));
+      const spd = 32.0;
+      const sideOff = actor.channelStep % 2 === 0 ? 0.55 : -0.55;
+      const rx = -fz * sideOff;
+      const rz = fx * sideOff;
+      room.projectiles.push({
+        id: helpers.makeId('proj'),
+        ownerId: actor.playerId,
+        fighterId: 'jm',
+        kind: 'jmBolt',
+        x: actor.x + (dx / len) * 0.9 + rx,
+        y: actor.y + 1.1,
+        z: actor.z + (dz / len) * 0.9 + rz,
+        vx: (dx / len) * spd,
+        vy: (dy / len) * spd,
+        vz: (dz / len) * spd,
+        rotY: Math.atan2(dx, dz),
+        colorHex: actor.channelStep % 2 === 0 ? 0xfef08a : 0x38bdf8,
+        originX: actor.x,
+        originY: actor.y + 1.1,
+        originZ: actor.z,
+        targetX: tx,
+        targetY: ty,
+        targetZ: tz,
+        isOverdrive: true,
+        age: 0,
+        maxAge: 0.72,
+        maxRange: 26.0,
+        damage: 4,
+        staggerDamage: 8,
+        knockback: 1.8,
+        hitIds: new Set(),
+      });
+    }
+  } else if (kind === 'jm_nova_slam') {
+    const rad = AWAKENING_CONFIG.JM_DIVINE_NOVA_RADIUS + 0.6;
+    // Keep caught enemies suspended in mid-air during the 0.6s pillar channel!
+    for (const t of room.actors) {
+      if (t.playerId === actor.playerId || t.isKO) continue;
+      const d = Math.hypot(t.x - actor.channelTargetX, t.z - actor.channelTargetZ);
+      if (d <= rad + 0.8 && !t.grounded) {
+        const targetLiftY = getMapTerrainHeight(room.mapId, t.x, t.z) + 2.95;
+        t.yVel = (targetLiftY - t.y) * 6.5;
+      }
+    }
+    if (actor.channelTimer <= 0) {
+      const fx = Math.sin(actor.rotY);
+      const fz = Math.cos(actor.rotY);
+      const spikePt =
+        actor.pendingAimX !== null && actor.pendingAimZ !== null
+          ? { x: actor.pendingAimX, z: actor.pendingAimZ }
+          : { x: actor.x + fx * 2.2, z: actor.z + fz * 2.2 };
       helpers.damageObstaclesInArea(room, actor.x, actor.z, rad, 55, 0xfef08a);
       helpers.pushEvent(room, {
-        kind: 'shockwave',
+        kind: 'pillarShatter',
         attackerId: actor.playerId,
         fighterId: 'jm',
         x: actor.x,
-        y: actor.y + 0.25,
+        y: actor.y + 0.3,
         z: actor.z,
         radius: rad,
         colorHex: 0xfef08a,
@@ -2244,18 +2595,223 @@ export function tickAwakenedChannel(
         hitStopMs: 80,
         callout: 'SANCTUARY NOVA SHATTER!',
       });
+      helpers.pushEvent(room, {
+        kind: 'craterSlam',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: spikePt.x,
+        y: getMapTerrainHeight(room.mapId, spikePt.x, spikePt.z) + 0.3,
+        z: spikePt.z,
+        radius: rad * 0.72,
+        colorHex: 0x38bdf8,
+        abilitySlot: 3,
+      });
       for (const t of room.actors) {
         if (t.playerId === actor.playerId || t.isKO) continue;
         const d = Math.hypot(t.x - actor.x, t.z - actor.z);
-        if (d <= rad) {
+        if (d <= rad + 0.8) {
+          const safeSpike = resolveObstacleCollisions(
+            room.mapId,
+            spikePt.x + (Math.random() - 0.5) * 0.6,
+            0.2,
+            spikePt.z + (Math.random() - 0.5) * 0.6,
+            0.48,
+            room.obstacles
+          );
           const calc = helpers.computeDynamicDamage(actor, t, 18, 3);
-          if (helpers.applyHit(room, actor, t, calc.dmg, 30, 12.5, d > 0.05 ? (t.x - actor.x) / d : fx, d > 0.05 ? (t.z - actor.z) / d : fz, 0xfef08a, true)) {
+          if (helpers.applyHit(room, actor, t, calc.dmg, 30, 1.8, fx, fz, 0xfef08a, true)) {
+            t.x = safeSpike.x;
+            t.z = safeSpike.z;
+            t.y = getMapTerrainHeight(room.mapId, safeSpike.x, safeSpike.z) + 0.32;
+            t.yVel = 4.4;
+            t.grounded = false;
+            t.vx = 0;
+            t.vz = 0;
+            applyDirectStun(t, 0.68, false);
             actor.landedCurrentAction = true;
           }
         }
       }
       actor.channelKind = null;
       return;
+    }
+  } else if (kind === 'jm_sky_uppercut') {
+    const tgt = room.actors.find((a) => a.playerId === actor.skyComboTargetId && !a.isKO);
+    if (!tgt) {
+      actor.skyComboPrompt = false;
+      actor.skyComboTargetId = null;
+      actor.channelKind = null;
+      return;
+    }
+    const peakY = getMapTerrainHeight(room.mapId, tgt.x, tgt.z) + 7.4;
+    const progress = clamp(1 - actor.channelTimer / Math.max(0.01, actor.channelDuration), 0, 1);
+    const curY = actor.y + (peakY - actor.y) * Math.min(1, dt * 11.0);
+    actor.y = Math.min(peakY, curY);
+    tgt.y = Math.min(peakY + 0.35, tgt.y + (peakY - tgt.y) * Math.min(1, dt * 12.0));
+    actor.yVel = 0;
+    tgt.yVel = 0;
+    actor.grounded = false;
+    tgt.grounded = false;
+    const fx = Math.sin(actor.rotY);
+    const fz = Math.cos(actor.rotY);
+    tgt.x = actor.x + fx * 1.35;
+    tgt.z = actor.z + fz * 1.35;
+    if (progress > 0.1 && actor.channelStep === 0) {
+      actor.channelStep = 1;
+      helpers.pushEvent(room, {
+        kind: 'crescentSlash',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: tgt.x,
+        y: tgt.y + 0.9,
+        z: tgt.z,
+        dirX: fx,
+        dirZ: fz,
+        radius: 2.4,
+        colorHex: 0xfef08a,
+        abilitySlot: 4,
+      });
+    }
+    if (actor.channelTimer <= 0) {
+      actor.channelKind = 'jm_sky_peak';
+      actor.channelDuration = 0.95;
+      actor.channelTimer = 0.95;
+      actor.channelTickTimer = 0.25;
+      actor.channelStep = 0;
+      actor.skyComboPrompt = true;
+      actor.skyComboMashes = 0;
+      actor.actionTimer = 0.95;
+      return;
+    }
+  } else if (kind === 'jm_sky_peak') {
+    const tgt = room.actors.find((a) => a.playerId === actor.skyComboTargetId && !a.isKO);
+    if (!tgt) {
+      actor.skyComboPrompt = false;
+      actor.skyComboTargetId = null;
+      actor.channelKind = null;
+      return;
+    }
+    const peakY = getMapTerrainHeight(room.mapId, tgt.x, tgt.z) + 7.4;
+    actor.y = peakY;
+    tgt.y = peakY + 0.25;
+    actor.yVel = 0;
+    tgt.yVel = 0;
+    actor.grounded = false;
+    tgt.grounded = false;
+    const fx = Math.sin(actor.rotY);
+    const fz = Math.cos(actor.rotY);
+    tgt.x = actor.x + fx * 1.35;
+    tgt.z = actor.z + fz * 1.35;
+    if (actor.isBot && actor.channelTickTimer <= 0) {
+      actor.channelTickTimer = 0.18;
+      actor.skyComboMashes = (actor.skyComboMashes ?? 0) + 1;
+    }
+    if (actor.channelTimer <= 0) {
+      actor.skyComboPrompt = false;
+      const outcome = resolveSkyAutoComboOutcome(actor.skyComboMashes ?? 0, 2);
+      if (outcome === 'aerial_finisher') {
+        actor.channelKind = 'jm_sky_finisher';
+        actor.channelDuration = 1.05;
+        actor.channelTimer = 1.05;
+        actor.channelTickTimer = 0.01;
+        actor.channelStep = 0;
+        actor.actionTimer = 1.05;
+        return;
+      }
+      actor.skyComboTargetId = null;
+      actor.channelKind = null;
+      return;
+    }
+  } else if (kind === 'jm_sky_finisher') {
+    const tgt = room.actors.find((a) => a.playerId === actor.skyComboTargetId && !a.isKO);
+    if (!tgt) {
+      actor.skyComboPrompt = false;
+      actor.skyComboTargetId = null;
+      actor.channelKind = null;
+      return;
+    }
+    const fx = Math.sin(actor.rotY);
+    const fz = Math.cos(actor.rotY);
+    if (actor.channelStep < 3) {
+      const hoverY = getMapTerrainHeight(room.mapId, tgt.x, tgt.z) + 7.2;
+      actor.y = hoverY;
+      tgt.y = hoverY + 0.2;
+      actor.yVel = 0;
+      tgt.yVel = 0;
+      tgt.x = actor.x + fx * 1.35;
+      tgt.z = actor.z + fz * 1.35;
+    }
+    if (actor.channelTickTimer <= 0) {
+      actor.channelTickTimer = 0.26;
+      const step = actor.channelStep;
+      actor.channelStep += 1;
+      actor.skyComboStep = step + 1;
+      if (step === 0 || step === 1) {
+        const dmgCalc = helpers.computeDynamicDamage(actor, tgt, 8, 4);
+        helpers.applyHit(room, actor, tgt, dmgCalc.dmg, 10, 0.2, fx, fz, 0xfef08a, false);
+        applyDirectStun(tgt, 0.55, true);
+        helpers.pushEvent(room, {
+          kind: 'crescentSlash',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: tgt.x,
+          y: tgt.y + 0.9,
+          z: tgt.z,
+          dirX: fx,
+          dirZ: fz,
+          radius: 2.3,
+          colorHex: step === 0 ? 0xfef08a : 0x38bdf8,
+          abilitySlot: 4,
+          comboStep: (step + 1) as 1 | 2,
+          callout: step === 0 ? 'AERIAL PUNCH!' : 'SKY KICK!',
+        });
+      } else if (step === 2) {
+        const dmgCalc = helpers.computeDynamicDamage(actor, tgt, 10, 4);
+        helpers.applyHit(room, actor, tgt, dmgCalc.dmg, 14, 0.3, fx, fz, 0x38bdf8, true);
+        applyDirectStun(tgt, 0.55, true);
+        helpers.pushEvent(room, {
+          kind: 'beam',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x + fx * 0.65,
+          y: actor.y + 1.0,
+          z: actor.z + fz * 0.65,
+          dirX: fx,
+          dirZ: fz,
+          radius: 1.6,
+          colorHex: 0x38bdf8,
+          abilitySlot: 4,
+          comboStep: 3,
+          callout: 'POINT-BLANK KAMEHAMEHA!',
+        });
+      } else {
+        // Step 3: High-speed Dash Downslam!
+        const floorY = getMapTerrainHeight(room.mapId, tgt.x, tgt.z);
+        actor.y = floorY + 0.35;
+        tgt.y = floorY + 0.3;
+        actor.yVel = 0;
+        tgt.yVel = 4.6;
+        tgt.grounded = false;
+        const dmgCalc = helpers.computeDynamicDamage(actor, tgt, 16, 4);
+        helpers.applyHit(room, actor, tgt, dmgCalc.dmg, 24, 3.0, fx, fz, 0xfef08a, true, false, true, true);
+        applyDirectStun(tgt, 0.72, true);
+        helpers.pushEvent(room, {
+          kind: 'craterSlam',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: tgt.x,
+          y: floorY + 0.3,
+          z: tgt.z,
+          radius: 5.0,
+          colorHex: 0xfef08a,
+          abilitySlot: 4,
+          isCounter: true,
+          hitStopMs: 95,
+          callout: 'CELESTIAL DOWNSLAM!',
+        });
+        actor.skyComboTargetId = null;
+        actor.channelTimer = 0;
+      }
     }
   } else if (kind === 'khen_domain') {
     const cx = actor.channelTargetX;
@@ -2300,7 +2856,7 @@ export function tickAwakenedChannel(
           const dmg = isFinal ? 16 : 6;
           const calc = helpers.computeDynamicDamage(actor, t, dmg, 6);
           if (helpers.applyHit(room, actor, t, calc.dmg, isFinal ? 36 : 10, isFinal ? 12.0 : -3.5, d > 0.05 ? (t.x - cx) / d : 0, d > 0.05 ? (t.z - cz) / d : 1, 0xa855f7, isFinal, !isFinal, isFinal, true, calc.isBackstab)) {
-            applyDirectStun(t, isFinal ? 0.8 : 0.55);
+            applyDirectStun(t, isFinal ? 0.75 : 0.45, isFinal);
             actor.landedCurrentAction = true;
           }
         }
@@ -2378,16 +2934,17 @@ export function tickAwakenedChannel(
     // Continuously pull/suck nearby enemies inward toward typhoon eye
     for (const t of room.actors) {
       if (t.playerId === actor.playerId || t.isKO) continue;
+      if (areActorsAllied(actor, t, room.gameMode ?? 'classic')) continue;
       const dx = actor.x - t.x;
       const dz = actor.z - t.z;
       const d = Math.hypot(dx, dz);
       if (d <= rad && d > 0.35) {
-        t.vx += (dx / d) * AWAKENING_CONFIG.MARJOHN_TYPHOON_PULL * dt;
-        t.vz += (dz / d) * AWAKENING_CONFIG.MARJOHN_TYPHOON_PULL * dt;
+        t.vx += (dx / d) * (AWAKENING_CONFIG.MARJOHN_TYPHOON_PULL * 1.25) * dt;
+        t.vz += (dz / d) * (AWAKENING_CONFIG.MARJOHN_TYPHOON_PULL * 1.25) * dt;
       }
     }
     if (actor.channelTickTimer <= 0) {
-      actor.channelTickTimer = 0.26;
+      actor.channelTickTimer = 0.2;
       const isFinal = actor.channelTimer <= 0.28;
       helpers.damageObstaclesInArea(room, actor.x, actor.z, rad, isFinal ? 80 : 18, 0x22d3ee);
       for (const t of room.actors) {
@@ -2465,6 +3022,7 @@ export function tickAwakenedZoneBehavior(
   if (z.kind === 'maelstromTornado') {
     for (const target of room.actors) {
       if (target.playerId === z.ownerId || target.isKO) continue;
+      if (areActorsAllied(owner, target, room.gameMode ?? 'classic')) continue;
       const dx = z.x - target.x;
       const dz = z.z - target.z;
       const d = Math.hypot(dx, dz);

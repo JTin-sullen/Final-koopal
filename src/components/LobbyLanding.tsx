@@ -19,6 +19,7 @@ import type { CloudUserProfile } from '../game/firebaseUsers.ts';
 import { canEnterArena } from '../game/userLogic.ts';
 import { usePWAInstall } from '../hooks/usePWAInstall.ts';
 import { FullscreenControls } from './FullscreenControls.tsx';
+import { GAME_MODES, GAME_MODE_BY_ID, type GameModeId } from '../shared/gameData.ts';
 
 interface LobbyLandingProps {
   initialRoomCode: string;
@@ -38,7 +39,12 @@ interface LobbyLandingProps {
   onOpenFirebaseGuide: () => void;
   onLoginAccount: (username: string) => void;
   onLogoutAccount: () => void;
-  onCreateRoom: (name: string, opts?: { isSoloPractice?: boolean; isTrainingMode?: boolean }) => void;
+  selectedMode: GameModeId;
+  onSelectMode: (mode: GameModeId) => void;
+  onCreateRoom: (
+    name: string,
+    opts?: { isSoloPractice?: boolean; isTrainingMode?: boolean; gameMode?: GameModeId }
+  ) => void;
   onJoinRoom: (roomCode: string, name: string) => void;
   onOpenCinemaCut: () => void;
   onOpenShop: () => void;
@@ -62,6 +68,8 @@ export const LobbyLanding: React.FC<LobbyLandingProps> = ({
   onOpenFirebaseGuide,
   onLoginAccount,
   onLogoutAccount,
+  selectedMode,
+  onSelectMode,
   onCreateRoom,
   onJoinRoom,
   onOpenCinemaCut,
@@ -461,6 +469,39 @@ export const LobbyLanding: React.FC<LobbyLandingProps> = ({
               />
             </div>
 
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-slate-700">Game Mode</span>
+                <span className="text-[10px] font-bold text-amber-700">
+                  {GAME_MODE_BY_ID[selectedMode]?.playersHint}
+                </span>
+              </div>
+              <div data-testid="lobby-mode-selector" className="flex flex-wrap gap-1.5">
+                {GAME_MODES.map((gm) => {
+                  const active = selectedMode === gm.id;
+                  return (
+                    <button
+                      key={gm.id}
+                      type="button"
+                      data-testid={`lobby-mode-${gm.id}`}
+                      onClick={() => handleAction(() => onSelectMode(gm.id), false, 'uiSelect')}
+                      title={gm.description}
+                      className={`flex-1 min-w-[30%] px-2 py-1.5 rounded-lg border text-[10px] font-display font-bold uppercase tracking-tight cursor-pointer transition text-center whitespace-nowrap ${
+                        active
+                          ? 'bg-slate-900 text-amber-300 border-slate-950 shadow-xs'
+                          : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-300'
+                      }`}
+                    >
+                      {gm.shortLabel}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                {GAME_MODE_BY_ID[selectedMode]?.description}
+              </p>
+            </div>
+
             {errorMessage && (
               <div className="rounded-xl bg-rose-50 border border-rose-300 px-3.5 py-2 text-xs text-rose-800 font-medium">
                 {errorMessage}
@@ -471,7 +512,9 @@ export const LobbyLanding: React.FC<LobbyLandingProps> = ({
               type="button"
               data-testid="create-room-btn"
               disabled={!entryGate.allowed}
-              onClick={() => handleAction(() => onCreateRoom(name, {}), true, 'transitionWhoosh')}
+              onClick={() =>
+                handleAction(() => onCreateRoom(name, { gameMode: selectedMode }), true, 'transitionWhoosh')
+              }
               className="ui-interactive btn-shimmer w-full min-h-[44px] px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-45 disabled:cursor-not-allowed text-slate-950 font-display font-bold text-base tracking-wide flex items-center justify-center gap-2 shadow-md border border-amber-500/60 cursor-pointer"
             >
               {!isSignedIn ? <Lock className="w-4 h-4" /> : <Users className="w-4 h-4" />}
@@ -513,11 +556,17 @@ export const LobbyLanding: React.FC<LobbyLandingProps> = ({
               data-testid="vs-bot-btn"
               data-start="true"
               disabled={!entryGate.allowed}
-              onClick={() => handleAction(() => onCreateRoom(name, { isSoloPractice: true }), true, 'transitionWhoosh')}
+              onClick={() =>
+                handleAction(
+                  () => onCreateRoom(name, { isSoloPractice: true, gameMode: selectedMode }),
+                  true,
+                  'transitionWhoosh'
+                )
+              }
               className="ui-interactive w-full min-h-[42px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 disabled:opacity-45 disabled:cursor-not-allowed text-slate-900 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-300 cursor-pointer"
             >
               {!isSignedIn ? <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" /> : <Swords className="w-4 h-4 text-amber-600 shrink-0" />}
-              <span>Vs. Bot (1v1)</span>
+              <span>Vs. Bot ({GAME_MODE_BY_ID[selectedMode]?.shortLabel})</span>
             </button>
             <button
               type="button"

@@ -49,61 +49,40 @@ export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
     return rendered || kit2.portraitUrl || '';
   }, [cutscene.p2FighterId, cutscene.p2SkinId, kit2.portraitUrl]);
 
-  // Hold-to-skip state (1.0s hold)
-  const [skipProgress, setSkipProgress] = useState(0);
-  const skipHoldStartRef = useRef<number | null>(null);
+  // First-time unskippable, subsequent skippable (straight to Button-Mash Spam Duel)
+  const [canSkipThisRun, setCanSkipThisRun] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('koopal_cutscene_seen_v1') === '1';
+    } catch {
+      return false;
+    }
+  });
   const skipTriggeredRef = useRef(false);
 
   useEffect(() => {
-    skipHoldStartRef.current = null;
     skipTriggeredRef.current = false;
-    setSkipProgress(0);
+    try {
+      setCanSkipThisRun(localStorage.getItem('koopal_cutscene_seen_v1') === '1');
+    } catch {
+      setCanSkipThisRun(false);
+    }
   }, [cutscene.id]);
 
+  // Mark cutscene seen once player reaches the Spam Duel or resolves their first cutscene
   useEffect(() => {
-    if (!AWAKENING_CONFIG.ALLOW_SKIP || !onSkip) return;
-    let raf = 0;
-    const step = () => {
-      if (skipHoldStartRef.current !== null && !skipTriggeredRef.current) {
-        const elapsed = (performance.now() - skipHoldStartRef.current) / 1000;
-        const pct = Math.min(1, elapsed / AWAKENING_CONFIG.SKIP_HOLD_SEC);
-        setSkipProgress(pct);
-        if (pct >= 1) {
-          skipTriggeredRef.current = true;
-          skipHoldStartRef.current = null;
-          onSkip();
-          return;
-        }
-        raf = requestAnimationFrame(step);
+    if (clock >= T.CLASH_START_AT || cutscene.resolved) {
+      try {
+        localStorage.setItem('koopal_cutscene_seen_v1', '1');
+      } catch {
+        // ignore storage restrictions
       }
-    };
-    const startLoop = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(step);
-    };
-    const onWindowUp = () => {
-      skipHoldStartRef.current = null;
-      setSkipProgress(0);
-    };
-    if (skipProgress > 0) startLoop();
-    window.addEventListener('pointerup', onWindowUp);
-    window.addEventListener('pointercancel', onWindowUp);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener('pointerup', onWindowUp);
-      window.removeEventListener('pointercancel', onWindowUp);
-    };
-  }, [onSkip, skipProgress]);
+    }
+  }, [clock, T.CLASH_START_AT, cutscene.resolved]);
 
-  const beginSkipHold = () => {
-    if (!AWAKENING_CONFIG.ALLOW_SKIP || !onSkip || skipTriggeredRef.current) return;
-    skipHoldStartRef.current = performance.now();
-    setSkipProgress(0.02);
-  };
-
-  const cancelSkipHold = () => {
-    skipHoldStartRef.current = null;
-    setSkipProgress(0);
+  const handleInstantSkip = () => {
+    if (!AWAKENING_CONFIG.ALLOW_SKIP || !onSkip || !canSkipThisRun || skipTriggeredRef.current) return;
+    skipTriggeredRef.current = true;
+    onSkip();
   };
 
   // Keyboard mash (Space for P1 / Enter for P2, with repeat ignored)
@@ -442,24 +421,21 @@ export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
         </div>
       )}
 
-      {/* Hold-to-Skip Button (1.0s hold) */}
-      {AWAKENING_CONFIG.ALLOW_SKIP && onSkip && !cutscene.resolved && (
-        <button
-          type="button"
-          data-testid="cutscene-skip-btn"
-          onPointerDown={beginSkipHold}
-          onPointerUp={cancelSkipHold}
-          onPointerLeave={cancelSkipHold}
-          onPointerCancel={cancelSkipHold}
-          className="fixed top-4 right-4 z-50 overflow-hidden rounded-xl bg-slate-950/85 border-2 border-white/60 px-3.5 py-2 text-xs font-display font-bold uppercase tracking-wider text-white shadow-lg cursor-pointer"
-        >
-          <div
-            className="absolute inset-0 bg-amber-400/50 transition-none pointer-events-none"
-            style={{ width: `${Math.round(skipProgress * 100)}%` }}
-          />
-          <span className="relative z-10">Hold to Skip</span>
-        </button>
-      )}
+      {/* Click-to-Skip Button (First match unskippable -> skips straight to Spam Duel on subsequent runs) */}
+      {AWAKENING_CONFIG.ALLOW_SKIP &&
+        onSkip &&
+        canSkipThisRun &&
+        !isClashPhase &&
+        !cutscene.resolved && (
+          <button
+            type="button"
+            data-testid="cutscene-skip-btn"
+            onClick={handleInstantSkip}
+            className="fixed top-4 right-4 z-50 rounded-xl bg-slate-950/90 hover:bg-amber-400 hover:text-slate-950 border-2 border-amber-300/80 px-4 py-2 text-xs font-display font-bold uppercase tracking-wider text-amber-200 shadow-lg cursor-pointer transition-colors"
+          >
+            Skip Cutscene → Duel
+          </button>
+        )}
     </div>
   );
 };

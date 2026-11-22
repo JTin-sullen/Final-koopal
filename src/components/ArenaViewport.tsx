@@ -26,7 +26,7 @@ import {
 import { BuiltMapScene, buildArenaMap, detectSoftwareWebGL } from '../game/mapBuilder.ts';
 import {
   advanceActionTimer,
-  computeCenterFacingCamera,
+  computeFreeHorizontalCamera,
   computeObstacleCameraPullIn,
   computeTraumaShake,
   createFrameTimeRing,
@@ -49,6 +49,10 @@ import {
 } from '../game/perfConfig.ts';
 
 const _projVec = new THREE.Vector3();
+const _raycaster = new THREE.Raycaster();
+const _pointerNdc = new THREE.Vector2();
+const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const _rayHit = new THREE.Vector3();
 
 export interface OrbScreenIndicator {
   id: string;
@@ -120,6 +124,7 @@ interface ArenaViewportProps {
   jitterMsRef: React.MutableRefObject<number>;
   localControlRef: React.MutableRefObject<LocalControlState>;
   aimPreviewRef?: React.MutableRefObject<AimPreviewState>;
+  cursorWorldRef?: React.MutableRefObject<{ x: number; z: number; active: boolean }>;
   onCanvasAttack?: (shiftHeld: boolean) => void;
   onCancelAim?: () => void;
   onSpawnDamagePopup?: (popup: DamagePopup) => void;
@@ -154,6 +159,7 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
   jitterMsRef,
   localControlRef,
   aimPreviewRef,
+  cursorWorldRef,
   onCanvasAttack,
   onCancelAim,
   onSpawnDamagePopup,
@@ -182,6 +188,7 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
   const cinematicCamRef = useRef<CinematicCamState | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const aimPreviewPropRef = useRef(aimPreviewRef);
+  const cursorWorldPropRef = useRef(cursorWorldRef);
   const onCanvasAttackRef = useRef(onCanvasAttack);
   const onCancelAimRef = useRef(onCancelAim);
   const onSpawnPopupRef = useRef(onSpawnDamagePopup);
@@ -191,12 +198,13 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
   const isLocalMatchRef = useRef<boolean>(isLocalMatch);
   const onPerfStatsRef = useRef(onPerfStats);
 
-  // Locked angled top-down camera orientation (fixed yaw = Math.PI, pitch = ~57 deg)
+  // Locked vertical Y-axis pitch camera orientation (free horizontal X-axis tracking)
   const lockedYawRef = useRef<number>(Math.PI);
 
   roomPhaseRef.current = roomPhase;
   roomCountdownRef.current = roomCountdown;
   aimPreviewPropRef.current = aimPreviewRef;
+  cursorWorldPropRef.current = cursorWorldRef;
   onCanvasAttackRef.current = onCanvasAttack;
   onCancelAimRef.current = onCancelAim;
   onSpawnPopupRef.current = onSpawnDamagePopup;
@@ -562,6 +570,28 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
       } else if (ev.kind === 'omnislash') {
         soundEngine.play('clash');
         shakeRef.current = Math.max(shakeRef.current, 0.68);
+      } else if (ev.kind === 'domainStart' || ev.kind === 'domainClashWin') {
+        soundEngine.play('domainExpand');
+        shakeRef.current = Math.max(shakeRef.current, 0.84);
+        slowMoUntilRef.current = Math.max(slowMoUntilRef.current, performance.now() + 260);
+        onScreenTintRef.current?.({
+          id: `${ev.id}-domain`,
+          kind: ev.fighterId === 'prime' ? 'avalanche-red' : ev.fighterId === 'khen' ? 'eclipse-vignette' : 'solar-white-gold',
+          durationMs: 520,
+        });
+      } else if (ev.kind === 'domainClashStart') {
+        soundEngine.play('domainClash');
+        shakeRef.current = Math.max(shakeRef.current, 0.7);
+      } else if (ev.kind === 'domainJackpot') {
+        soundEngine.play('jackpot');
+        shakeRef.current = Math.max(shakeRef.current, 0.45);
+        onScreenTintRef.current?.({
+          id: `${ev.id}-jackpot`,
+          kind: 'high-noon-amber',
+          durationMs: 420,
+        });
+      } else if (ev.kind === 'kothCapture') {
+        soundEngine.play('pickup');
       } else if (ev.kind === 'ko') {
         soundEngine.play('ko');
         shakeRef.current = Math.max(shakeRef.current, 0.8);
@@ -796,7 +826,31 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
     renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
     renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
 
-    // Locked top-down view: canvas click triggers M1 attack / right-click cancels aim (no orbit rotation)
+    // PC ground-cursor projection + click-to-attack / right-click cancel aim
+    const updateCursorWorld = (clientX: number, clientY: number) => {
+      const targetRef = cursorWorldPropRef.current;
+      if (!targetRef) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      _pointerNdc.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      _raycaster.setFromCamera(_pointerNdc, camera);
+      const hit = _raycaster.ray.intersectPlane(_groundPlane, _rayHit);
+      if (hit) {
+        targetRef.current.x = hit.x;
+        targetRef.current.z = hit.z;
+        targetRef.current.active = true;
+      }
+    };
+
+    const onWindowPointerMove = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' || e.pointerType === 'pen' || e.pointerType === '') {
+        updateCursorWorld(e.clientX, e.clientY);
+      }
+    };
+
     let pointerClick: {
       pointerId: number;
       startX: number;
@@ -805,6 +859,9 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
     } | null = null;
 
     const onCanvasPointerDown = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' || e.pointerType === 'pen' || e.pointerType === '') {
+        updateCursorWorld(e.clientX, e.clientY);
+      }
       if (pointerClick !== null) return;
       soundEngine.unlock();
       pointerClick = {
@@ -833,6 +890,7 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
       }
     };
 
+    window.addEventListener('pointermove', onWindowPointerMove, { passive: true });
     renderer.domElement.addEventListener('pointerdown', onCanvasPointerDown);
     renderer.domElement.addEventListener('pointerup', onCanvasPointerUp);
     renderer.domElement.addEventListener('pointercancel', onCanvasPointerUp);
@@ -990,6 +1048,8 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
         vfx.syncChannels(latestSnap.actors, latestSnap.zones ?? [], mapId, elapsed, dt);
         vfx.syncTelegraphs(latestSnap.telegraphs ?? [], mapId, elapsed);
         vfx.syncStormRing(latestSnap.stormActive, latestSnap.stormRadius, mapId, elapsed);
+        vfx.syncDomainExpansion(latestSnap.activeDomain, mapId, elapsed);
+        vfx.syncKothZone(latestSnap.kothZone, mapId, elapsed);
         vfx.syncChargingFireballs(latestSnap.actors, mapId, elapsed);
         vfx.syncAimPreview(aimPreviewPropRef.current?.current, mapId, elapsed);
         const csState = latestSnap.awakeningCutscene ?? null;
@@ -1064,7 +1124,13 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
               }
             }
             const isFreeRoamChannel =
-              myLatest.channelKind === 'prime_meteor' || myLatest.channelKind === 'marjohn_typhoon';
+              myLatest.channelKind === 'prime_meteor' ||
+              myLatest.channelKind === 'marjohn_typhoon' ||
+              myLatest.channelKind === 'jm_air_barrage';
+            const isJmSkyChannel =
+              myLatest.channelKind === 'jm_sky_uppercut' ||
+              myLatest.channelKind === 'jm_sky_peak' ||
+              myLatest.channelKind === 'jm_sky_finisher';
             const canMove =
               isFreeRoamChannel ||
               (!myLatest.channelKind &&
@@ -1082,9 +1148,11 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
             const speed =
               baseSpeed *
               (myLatest.channelKind === 'marjohn_typhoon'
-                ? 0.35
+                ? 0.85
                 : myLatest.channelKind === 'prime_meteor'
                 ? 1.0
+                : myLatest.channelKind === 'jm_air_barrage'
+                ? 0.55
                 : myLatest.actionState === 'whiff'
                 ? 0.44
                 : myLatest.actionState === 'guard' || ctrl.blockHeld
@@ -1172,7 +1240,11 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
               0.42,
               cachedObstacles
             );
-            if (isFreeRoamChannel) {
+            if (isJmSkyChannel) {
+              pred.y += (myLatest.y - pred.y) * Math.min(1, dt * 16);
+              pred.yVel = 0;
+              pred.grounded = myLatest.grounded;
+            } else if (isFreeRoamChannel && myLatest.channelKind !== 'jm_air_barrage') {
               const targetHover =
                 supportY + (myLatest.channelKind === 'marjohn_typhoon' ? 6.8 : 5.8);
               pred.y += (targetHover - pred.y) * Math.min(1, dt * 8.5);
@@ -1380,6 +1452,8 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
           sm.channelDuration = aLatest.channelDuration ?? 0;
           sm.channelTargetX = aLatest.channelTargetX ?? aLatest.x;
           sm.channelTargetZ = aLatest.channelTargetZ ?? aLatest.z;
+          sm.skyComboPrompt = Boolean(aLatest.skyComboPrompt);
+          sm.skyComboStep = aLatest.skyComboStep ?? 0;
           sm.cooldowns = aLatest.cooldowns;
           sm.isKO = aLatest.isKO;
           sm.koTime = aLatest.koTime;
@@ -1387,6 +1461,11 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
           sm.koCause = aLatest.koCause;
           sm.koByFighterId = aLatest.koByFighterId;
           sm.wins = aLatest.wins;
+          sm.domainGauge = aLatest.domainGauge ?? 0;
+          sm.stunImmunityTimer = aLatest.stunImmunityTimer ?? 0;
+          sm.team = aLatest.team;
+          sm.isRaidBoss = aLatest.isRaidBoss;
+          sm.deaths = aLatest.deaths;
 
           const worldBaseY = getMapTerrainHeight(mapId, sm.x, sm.z);
           vfx.setActorPosition(sm.playerId, sm.x, worldBaseY + sm.y, sm.z);
@@ -1397,7 +1476,7 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
             const nextStatus = (statusParticleTimersMap.get(sm.playerId) ?? 0) - dt;
             if (nextStatus <= 0) {
               statusParticleTimersMap.set(sm.playerId, renderProfile.statusParticleIntervalSec);
-              vfx.emitAwakenedStatusParticles(sm.x, worldBaseY + sm.y, sm.z, auraHex);
+              vfx.emitAwakenedStatusParticles(sm.x, worldBaseY + sm.y, sm.z, auraHex, sm.fighterId);
             } else {
               statusParticleTimersMap.set(sm.playerId, nextStatus);
             }
@@ -1595,32 +1674,31 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
           }
 
           const pitchRad = 0.78;
-          const centerRig = computeCenterFacingCamera(
+          const freeRig = computeFreeHorizontalCamera(
             focusX,
             focusY,
             focusZ,
-            lockedYawRef.current,
             focusActor.isFlying,
             pitchRad,
             camDist,
             isPortrait
           );
-          if (!camInitialized) {
-            lockedYawRef.current = centerRig.targetYaw;
-          } else {
-            lockedYawRef.current = dampAngle(lockedYawRef.current, centerRig.targetYaw, 6.5, rawDt);
-          }
-          const smoothYaw = lockedYawRef.current;
+          lockedYawRef.current = freeRig.yaw;
+          const smoothYaw = freeRig.yaw;
           const fwdX = Math.sin(smoothYaw);
           const fwdZ = Math.cos(smoothYaw);
           const lead = isPortrait ? 1.4 : 1.9;
           const effDist = (focusActor.isFlying ? camDist + 2.6 : camDist) + (isPortrait ? 3.2 : 0);
-          const lookX = focusX + fwdX * lead;
-          const lookY = focusY + (focusActor.isFlying ? 1.35 : 1.05);
-          const lookZ = focusZ + fwdZ * lead;
-          const rawCamX = lookX - fwdX * Math.cos(pitchRad) * effDist;
-          const rawCamY = lookY + Math.sin(pitchRad) * effDist;
-          const rawCamZ = lookZ - fwdZ * Math.cos(pitchRad) * effDist;
+          const lookX = freeRig.lookX;
+          const lookY = freeRig.lookY;
+          const lookZ = freeRig.lookZ;
+          const rawCamX = freeRig.camX;
+          const rawCamY = freeRig.camY;
+          const rawCamZ = freeRig.camZ;
+          void lead;
+          void effDist;
+          void fwdX;
+          void fwdZ;
           const pullInT = computeObstacleCameraPullIn(
             lookX,
             lookY,
@@ -1832,6 +1910,7 @@ export const ArenaViewport: React.FC<ArenaViewportProps> = React.memo(({
       window.removeEventListener('orientationchange', resize);
       window.visualViewport?.removeEventListener('resize', resize);
       document.removeEventListener('fullscreenchange', resize);
+      window.removeEventListener('pointermove', onWindowPointerMove);
       renderer.domElement.removeEventListener('pointerdown', onCanvasPointerDown);
       renderer.domElement.removeEventListener('pointerup', onCanvasPointerUp);
       renderer.domElement.removeEventListener('pointercancel', onCanvasPointerUp);

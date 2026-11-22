@@ -42,7 +42,10 @@ export type SoundKind =
   | 'knockbackImpact'
   | 'thunderStrike'
   | 'railgunShot'
-  | 'silence';
+  | 'silence'
+  | 'domainExpand'
+  | 'domainClash'
+  | 'jackpot';
 
 class SoundEngine {
   private ctx: AudioContext | null = null;
@@ -676,6 +679,50 @@ class SoundEngine {
       osc.connect(gain);
       osc.start(now);
       osc.stop(now + 0.28);
+      return;
+    }
+
+    if (kind === 'domainExpand' || kind === 'domainClash') {
+      const sub = ctx.createOscillator();
+      const chime = ctx.createOscillator();
+      const sweep = ctx.createOscillator();
+      sub.type = 'sine';
+      chime.type = 'triangle';
+      sweep.type = 'sawtooth';
+      sub.frequency.setValueAtTime(kind === 'domainExpand' ? 140 : 180, now);
+      sub.frequency.exponentialRampToValueAtTime(32, now + 0.72);
+      chime.frequency.setValueAtTime(kind === 'domainExpand' ? 440 : 587, now);
+      chime.frequency.exponentialRampToValueAtTime(kind === 'domainExpand' ? 1320 : 1760, now + 0.45);
+      sweep.frequency.setValueAtTime(110, now);
+      sweep.frequency.exponentialRampToValueAtTime(660, now + 0.55);
+      gain.gain.setValueAtTime(0.32, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.76);
+      sub.connect(gain);
+      chime.connect(gain);
+      sweep.connect(gain);
+      sub.start(now);
+      chime.start(now);
+      sweep.start(now);
+      sub.stop(now + 0.78);
+      chime.stop(now + 0.5);
+      sweep.stop(now + 0.6);
+      return;
+    }
+
+    if (kind === 'jackpot') {
+      [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = 'triangle';
+        const t = now + i * 0.045;
+        osc.frequency.setValueAtTime(freq, t);
+        g.gain.setValueAtTime(0.18, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+        osc.connect(g);
+        g.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.26);
+      });
     }
   }
 }
@@ -738,6 +785,28 @@ class JaneCutsceneAudio {
 
   public isPlaying(): boolean {
     return Boolean(this.audio && !this.audio.paused && !this.audio.ended);
+  }
+
+  public seekTo(clockSec: number): void {
+    const el = this.ensureAudio();
+    if (!el) return;
+    try {
+      soundEngine.unlock();
+      el.currentTime = Math.max(0, clockSec);
+      const vol = soundEngine.muted ? 0 : this.targetVolume;
+      if (this.gainNode) {
+        this.gainNode.gain.value = vol;
+      } else {
+        el.volume = vol;
+      }
+      if (el.paused) {
+        void el.play().catch(() => {
+          // Autoplay blocked
+        });
+      }
+    } catch {
+      // Ignore seek errors
+    }
   }
 
   public getCurrentTime(): number | null {

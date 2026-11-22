@@ -2,12 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowUp,
   Coins,
-  Crosshair,
+  Crown,
   Feather,
   Flame,
   Hand,
-  Lock,
-  LockOpen,
   LogOut,
   RotateCcw,
   Shield,
@@ -28,6 +26,7 @@ import {
   CombatMoveType,
   FIGHTER_BY_ID,
   FighterId,
+  GAME_MODE_BY_ID,
   JM_SECRET_ABILITY,
   KoCause,
   MAP_BY_ID,
@@ -38,10 +37,12 @@ import {
 } from '../shared/gameData.ts';
 import { soundEngine } from '../game/soundEngine.ts';
 import { AWAKENING_CONFIG, getAwakenedAbility } from '../shared/awakeningConfig.ts';
+import { DOMAIN_CONFIGS } from '../game/domainLogic.ts';
 import {
   SKILL_HOLD_TIME_MS,
   computeAwakeningOrbCountdownSec,
   computeCountdownStep,
+  computeHudScale,
   computeSwipeAimPoint,
   selectNearestTarget,
   shouldEnterDragAim,
@@ -81,6 +82,7 @@ interface MobileCombatHUDProps {
   lockOnEnabled: boolean;
   cameraYawRef: React.MutableRefObject<number>;
   aimPreviewRef?: React.MutableRefObject<AimPreviewState>;
+  cursorWorldRef?: React.MutableRefObject<{ x: number; z: number; active: boolean }>;
   cancelAimTriggerSeq?: number;
   damagePopups: DamagePopup[];
   hitFlash: HitFlashInfo | null;
@@ -91,12 +93,14 @@ interface MobileCombatHUDProps {
   onToggleChat: () => void;
   onSendChat: (text: string) => void;
   onSelectTarget: (targetId: string | null) => void;
-  onToggleLockOn: () => void;
+  onToggleLockOn?: () => void;
   onMoveInput: (moveX: number, moveZ: number) => void;
   onJump: () => void;
   onToggleFlight: () => void;
   onDash: () => void;
   onGrab: () => void;
+  onDomainActivate?: () => void;
+  onDomainClashMash?: () => void;
   onClashPick: (clashId: string, choice: CombatMoveType) => void;
   onBlockHoldChange: (held: boolean) => void;
   onCastAbility: (
@@ -191,6 +195,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
   lockOnEnabled,
   cameraYawRef,
   aimPreviewRef,
+  cursorWorldRef,
   cancelAimTriggerSeq = 0,
   damagePopups,
   hitFlash,
@@ -201,12 +206,14 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
   onToggleChat,
   onSendChat,
   onSelectTarget,
-  onToggleLockOn,
+  onToggleLockOn: _onToggleLockOn,
   onMoveInput,
   onJump,
   onToggleFlight,
   onDash,
   onGrab,
+  onDomainActivate,
+  onDomainClashMash,
   onClashPick,
   onBlockHoldChange,
   onCastAbility,
@@ -222,6 +229,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
   const [mashPulseKey, setMashPulseKey] = useState<number>(0);
   const [isCompactScreen, setIsCompactScreen] = useState(false);
   const [isNarrowPortrait, setIsNarrowPortrait] = useState(false);
+  const [hudScale, setHudScale] = useState(1);
   const lastCountdownStepRef = useRef<number | null>(null);
   const prevPhaseRef = useRef<RoomState['phase']>(room.phase);
   const [aimOverlay, setAimOverlay] = useState<{
@@ -318,6 +326,16 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
   const activeHeadlock = snapshot?.activeHeadlock ?? null;
   const headlockInvolvesMe =
     activeHeadlock && (activeHeadlock.grabberId === playerId || activeHeadlock.victimId === playerId);
+  const activeDomain = snapshot?.activeDomain ?? null;
+  const activeDomainClash = snapshot?.activeDomainClash ?? null;
+  const domainClashInvolvesMe = Boolean(
+    activeDomainClash &&
+      (activeDomainClash.p1Id === playerId || activeDomainClash.p2Id === playerId)
+  );
+  const onDomainActivateRef = useRef(onDomainActivate);
+  onDomainActivateRef.current = onDomainActivate;
+  const onDomainClashMashRef = useRef(onDomainClashMash);
+  onDomainClashMashRef.current = onDomainClashMash;
 
   // Live DOM updates for FPS / Frame Time / Ping badge (zero 500ms React tree re-renders)
   useEffect(() => {
@@ -373,13 +391,15 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
     prevPhaseRef.current = room.phase;
   }, [room.phase, room.countdown]);
 
-  // Responsive viewport detection (including visualViewport for mobile keyboard/toolbar transitions)
+  // Responsive viewport detection & dynamic HUD scaling (mobile portrait, landscape & desktop)
   useEffect(() => {
     const check = () => {
       const vw = window.visualViewport?.width ?? window.innerWidth;
       const vh = window.visualViewport?.height ?? window.innerHeight;
+      const isCoarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
       setIsCompactScreen(vw < 900 || vh < 540);
       setIsNarrowPortrait(vw < 430);
+      setHudScale(computeHudScale(vw, vh, isCoarse));
     };
     check();
     window.addEventListener('resize', check);
@@ -404,6 +424,25 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
     let dirX = Math.sin(actor.rotY);
     let dirZ = Math.cos(actor.rotY);
     let reach = ab.aimKind === 'point' ? Math.min(aimRange, 6.2) : aimRange;
+
+    const cursorWorld = cursorWorldRef?.current;
+    if (cursorWorld && cursorWorld.active) {
+      const cdx = cursorWorld.x - actor.x;
+      const cdz = cursorWorld.z - actor.z;
+      const cDist = Math.hypot(cdx, cdz);
+      if (cDist > 0.05) {
+        dirX = cdx / cDist;
+        dirZ = cdz / cDist;
+        reach = ab.aimKind === 'point' ? Math.min(aimRange, cDist) : aimRange;
+      }
+      return {
+        actor,
+        ab,
+        aimRange,
+        aimX: actor.x + dirX * reach,
+        aimZ: actor.z + dirZ * reach,
+      };
+    }
 
     let aimTarget: ArenaActorState | null = null;
     if (lockOnEnabledRef.current) {
@@ -616,7 +655,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
     onMoveInput(moveX, moveZ);
 
     const ka = kbAimRef.current;
-    if (ka && ka.holdMode && !ka.cancelled) {
+    if (ka && !ka.cancelled) {
       const coords = computeKeyboardAimCoords(ka.slot);
       if (coords) {
         ka.aimX = coords.aimX;
@@ -657,7 +696,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
         const hasActiveMoveOrAim =
           joyPointerId.current !== null ||
           keysPressed.current.size > 0 ||
-          Boolean(kbAimRef.current?.holdMode && !kbAimRef.current?.cancelled);
+          Boolean(kbAimRef.current && !kbAimRef.current.cancelled);
         if (hasActiveMoveOrAim) {
           wasActiveInput = true;
           computeAndSendRef.current();
@@ -678,13 +717,18 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
       onClashPick(activeClash.id, 'strike');
       return;
     }
+    const cw = cursorWorldRef?.current;
+    if (cw && cw.active) {
+      onCastAbility(0, shiftHeld, { aimX: cw.x, aimZ: cw.z });
+      return;
+    }
     onCastAbility(0, shiftHeld);
   };
 
   const triggerM1Ref = useRef(triggerM1);
   triggerM1Ref.current = triggerM1;
 
-  // Keyboard shortcuts (WASD move, Space Jump, E JM Sky Flight, Q Dash, Tab Lock-On, M1/J Attack, F Guard, G Grab+Headlock Mash, 1/2/3 Skills+Ult, R/4 Awakened Skill 4, O Secret)
+  // Keyboard shortcuts (WASD move, Space Jump, E JM Sky Flight, Q Dash, V Domain, M1/J Attack, F Guard, G Grab, 1/2/3 Skills+Ult, R/4 Awakened Skill 4, O Secret)
   useEffect(() => {
     const startKeyboardAimOrCast = (slot: AbilitySlot, code: string) => {
       const actor = myActorRef.current;
@@ -693,7 +737,12 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
       const ab = getAbilitySpec(actor.fighterId, slot, actor.awakened);
       const supportsAim = !isStage2 && Boolean(ab.aimKind && ab.aimKind !== 'none');
       if (!supportsAim) {
-        onCastAbilityRef.current(slot);
+        const cw = cursorWorldRef?.current;
+        if (cw && cw.active) {
+          onCastAbilityRef.current(slot, false, { aimX: cw.x, aimZ: cw.z });
+        } else {
+          onCastAbilityRef.current(slot);
+        }
         return;
       }
 
@@ -701,6 +750,23 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
       const init = computeKeyboardAimCoords(slot);
       const initAimX = init?.aimX ?? actor.x + Math.sin(actor.rotY) * (ab.aimRange ?? 8.0);
       const initAimZ = init?.aimZ ?? actor.z + Math.cos(actor.rotY) * (ab.aimRange ?? 8.0);
+
+      // Immediately project the circular Skill Range Indicator + cursor aim reticle on press (zero delay)
+      if (aimPreviewRef && init) {
+        aimPreviewRef.current = {
+          active: true,
+          cancelled: false,
+          aimKind: init.ab.aimKind ?? 'point',
+          originX: init.actor.x,
+          originY: init.actor.y,
+          originZ: init.actor.z,
+          aimX: initAimX,
+          aimZ: initAimZ,
+          radius: init.ab.aimRadius ?? 3.0,
+          range: init.aimRange,
+          colorHex: slot === 5 ? 0xfacc15 : FIGHTER_BY_ID[init.actor.fighterId].hex,
+        };
+      }
 
       const timer = setTimeout(() => {
         const cur = kbAimRef.current;
@@ -710,21 +776,6 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
         if (fresh) {
           cur.aimX = fresh.aimX;
           cur.aimZ = fresh.aimZ;
-          if (aimPreviewRef) {
-            aimPreviewRef.current = {
-              active: true,
-              cancelled: false,
-              aimKind: fresh.ab.aimKind ?? 'point',
-              originX: fresh.actor.x,
-              originY: fresh.actor.y,
-              originZ: fresh.actor.z,
-              aimX: fresh.aimX,
-              aimZ: fresh.aimZ,
-              radius: fresh.ab.aimRadius ?? 3.0,
-              range: fresh.aimRange,
-              colorHex: slot === 5 ? 0xfacc15 : FIGHTER_BY_ID[fresh.actor.fighterId].hex,
-            };
-          }
         }
       }, SKILL_HOLD_TIME_MS);
 
@@ -746,16 +797,22 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
       const slot = cur.slot;
       const holdMode = cur.holdMode;
       const cancelled = cur.cancelled;
-      const aimX = cur.aimX;
-      const aimZ = cur.aimZ;
+      const fresh = computeKeyboardAimCoords(slot);
+      const aimX = fresh?.aimX ?? cur.aimX;
+      const aimZ = fresh?.aimZ ?? cur.aimZ;
       kbAimRef.current = null;
       if (aimPreviewRef) {
         aimPreviewRef.current.active = false;
         aimPreviewRef.current.cancelled = false;
       }
       if (cancelled) return;
-      if (holdMode) {
-        onCastAbilityRef.current(slot, false, { aimX, aimZ, isHoldVariant: true });
+      const hasCursor = Boolean(cursorWorldRef?.current?.active);
+      if (holdMode || hasCursor) {
+        onCastAbilityRef.current(slot, false, {
+          aimX,
+          aimZ,
+          isHoldVariant: holdMode,
+        });
       } else {
         onCastAbilityRef.current(slot, false);
       }
@@ -797,23 +854,39 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
 
       if (e.code === 'Escape') {
         cancelActiveAim();
-      } else if (e.code === 'Tab') {
+      } else if (e.code === 'KeyV') {
         e.preventDefault();
-        onToggleLockOn();
+        const dc = snapshotRef.current?.activeDomainClash;
+        if (dc && (dc.p1Id === playerId || dc.p2Id === playerId)) {
+          soundEngine.unlock();
+          soundEngine.play('mashTick');
+          onDomainClashMashRef.current?.();
+        } else {
+          onDomainActivateRef.current?.();
+        }
       } else if (e.code === 'Space') {
         e.preventDefault();
+        const dc = snapshotRef.current?.activeDomainClash;
+        if (dc && (dc.p1Id === playerId || dc.p2Id === playerId)) {
+          soundEngine.unlock();
+          soundEngine.play('mashTick');
+          onDomainClashMashRef.current?.();
+          return;
+        }
         onJump();
       } else if (e.code === 'KeyE') {
         if (myActorRef.current?.fighterId === 'jm') {
           onToggleFlight();
         }
       } else if (e.code === 'KeyR') {
-        if (myActorRef.current?.awakened) {
+        if (myActorRef.current?.fighterId === 'jm') {
+          onToggleFlight();
+        } else if (myActorRef.current?.awakened) {
           startKeyboardAimOrCast(6, e.code);
         }
       } else if (e.code === 'KeyQ') {
         e.preventDefault();
-        cancelActiveAim();
+        // Keep any held skill aim active so players can Dash mid-aim!
         onDash();
       } else if (e.code === 'KeyJ') {
         triggerM1Ref.current(e.shiftKey);
@@ -869,7 +942,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
         e.code === 'Digit3' ||
         e.code === 'KeyO' ||
         e.code === 'Digit4' ||
-        e.code === 'KeyR'
+        (e.code === 'KeyR' && myActorRef.current?.fighterId !== 'jm')
       ) {
         releaseKeyboardAim(e.code);
       }
@@ -886,7 +959,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
     activeClash,
     myClashChoice,
     aimPreviewRef,
-    onToggleLockOn,
+    cursorWorldRef,
     onJump,
     onToggleFlight,
     onDash,
@@ -1134,18 +1207,6 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
     }
   };
 
-  const cycleTarget = () => {
-    if (!snapshot) return;
-    const enemies = snapshot.actors.filter((a) => a.playerId !== playerId && !a.isKO);
-    if (enemies.length === 0) {
-      onSelectTarget(null);
-      return;
-    }
-    const idx = enemies.findIndex((e) => e.playerId === targetId);
-    const next = enemies[(idx + 1) % enemies.length];
-    onSelectTarget(next.playerId);
-  };
-
   const actors = snapshot?.actors ?? [];
   const otherActors = actors.filter((a) => a.playerId !== playerId);
   const winnerActor = room.winnerId ? actors.find((a) => a.playerId === room.winnerId) : null;
@@ -1343,7 +1404,10 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
 
       {/* MLBB TOP BAR: TOP-LEFT MINIMAP + PLAYER BAR | TOP-RIGHT KOs, COINS, ADMIN & QUICK MENU */}
       <div className="w-full flex items-start justify-between gap-1.5 sm:gap-2 pointer-events-none">
-        <div className="flex items-start gap-1.5 sm:gap-2 shrink-0 min-w-0 pointer-events-auto">
+        <div
+          className="flex items-start gap-1.5 sm:gap-2 shrink-0 min-w-0 pointer-events-auto origin-top-left"
+          style={{ transform: `scale(${Math.min(1, hudScale)})` }}
+        >
           {/* Top-Left Live Tactical Minimap */}
           {snapshot && (
             <ArenaMinimap
@@ -1354,6 +1418,8 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
               obstacles={snapshot.obstacles}
               pickups={snapshot.pickups}
               awakeningOrbs={snapshot.awakeningOrbs ?? []}
+              kothZone={snapshot.kothZone ?? null}
+              activeDomain={activeDomain}
               stormActive={stormActive}
               stormRadius={stormRadius}
               compact={isNarrowPortrait || isCompactScreen}
@@ -1541,7 +1607,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                   </div>
                 </div>
 
-                {/* Stagger Meter + Passive Readout (GPU scaleX) */}
+                {/* Stagger Meter + Domain Gauge + Passive Readout */}
                 <div className="mt-1 flex items-center justify-between gap-1 text-[8px]">
                   <div className="flex items-center gap-1 flex-1 min-w-0">
                     <span className="text-slate-600 font-bold shrink-0">STAG</span>
@@ -1564,6 +1630,31 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                       {passiveInfo.label}
                     </span>
                   )}
+                </div>
+
+                {/* Domain Expansion Meter */}
+                <div className="mt-0.5 flex items-center gap-1 text-[8px]">
+                  <span className="text-purple-700 font-bold shrink-0">DOM</span>
+                  <div className="h-1.5 flex-1 bg-slate-200 rounded-full overflow-hidden border border-purple-300/60">
+                    <div
+                      className={`h-full w-full origin-left transition-transform duration-100 ${
+                        (myActor.domainGauge ?? 0) >= 100
+                          ? 'bg-gradient-to-r from-purple-500 via-fuchsia-400 to-amber-300'
+                          : 'bg-purple-500'
+                      }`}
+                      style={{
+                        transform: `scaleX(${Math.max(0, Math.min(100, myActor.domainGauge ?? 0)) / 100})`,
+                      }}
+                    />
+                  </div>
+                  <span
+                    data-testid="domain-gauge-text"
+                    className={`font-mono-num font-bold shrink-0 ${
+                      (myActor.domainGauge ?? 0) >= 100 ? 'text-purple-700' : 'text-slate-700'
+                    }`}
+                  >
+                    {Math.round(myActor.domainGauge ?? 0)}%
+                  </span>
                 </div>
               </div>
 
@@ -1768,42 +1859,6 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
               type="button"
               onClick={() => {
                 soundEngine.unlock();
-                soundEngine.play('uiClick');
-                onToggleLockOn();
-              }}
-              title="Toggle Camera Lock-On (Tab)"
-              className={`ui-interactive ${
-                isNarrowPortrait ? 'min-h-[30px] min-w-[30px] px-1.5' : 'min-h-[34px] min-w-[34px] px-2'
-              } rounded-lg border text-xs font-semibold flex items-center gap-1 cursor-pointer shadow-xs ${
-                lockOnEnabled
-                  ? 'bg-sky-50 border-sky-400 text-sky-900'
-                  : 'bg-white/95 border-slate-300 text-slate-700'
-              }`}
-            >
-              {lockOnEnabled ? <Lock className="w-3.5 h-3.5 text-sky-600" /> : <LockOpen className="w-3.5 h-3.5 text-slate-500" />}
-              <span className="hidden sm:inline">{lockOnEnabled ? 'Lock' : 'Free'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                soundEngine.unlock();
-                soundEngine.play('uiClick');
-                cycleTarget();
-              }}
-              title="Switch Target"
-              className={`ui-interactive ${
-                isNarrowPortrait ? 'min-h-[30px] min-w-[30px] px-1.5' : 'min-h-[34px] min-w-[34px] px-2'
-              } rounded-lg bg-white/95 hover:bg-slate-100 border border-slate-300 text-xs font-semibold text-slate-800 flex items-center gap-1 cursor-pointer shadow-xs`}
-            >
-              <Crosshair className="w-3.5 h-3.5 text-rose-600" />
-              <span className="hidden sm:inline">Target</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                soundEngine.unlock();
                 const nextMuted = soundEngine.toggleMute();
                 setMuted(nextMuted);
                 if (!nextMuted) soundEngine.play('uiClick');
@@ -1990,11 +2045,98 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
             )}
 
             {!room.isSoloPractice && !room.isTrainingMode && !battleEvent && (
-              <div className="text-[10px] sm:text-xs font-mono-num font-semibold text-slate-800 bg-white/95 border border-slate-300 px-2.5 py-0.5 rounded-lg shadow-sm">
-                R{room.roundNumber} · {MAP_BY_ID[room.mapId].name} · FT{room.winsToWin}
+              <div className="text-[10px] sm:text-xs font-mono-num font-semibold text-slate-800 bg-white/95 border border-slate-300 px-2.5 py-0.5 rounded-lg shadow-sm flex items-center gap-1.5">
+                <span className="font-display font-bold text-amber-700">
+                  {GAME_MODE_BY_ID[room.gameMode]?.shortLabel ?? 'CLASSIC'}
+                </span>
+                <span>·</span>
+                <span>
+                  {room.gameMode === 'classic'
+                    ? `R${room.roundNumber} · FT${room.winsToWin}`
+                    : MAP_BY_ID[room.mapId].name}
+                </span>
               </div>
             )}
+
+            {/* Game Mode Live Objectives: Squad Scoreboard / KOTH Timer / Raid Boss HP / Sudden Death */}
+            {!room.isTrainingMode && room.gameMode === 'squad_clash' && snapshot?.teamScores && (
+              <div
+                data-testid="mode-scoreboard-squad"
+                className="px-2.5 py-0.5 rounded-lg bg-slate-900 text-white border border-purple-400 font-mono-num text-[10px] sm:text-xs font-bold shadow-sm flex items-center gap-2"
+              >
+                <span className="text-sky-300">ALPHA {snapshot.teamScores.alpha}</span>
+                <span className="text-slate-400">/ 10</span>
+                <span className="text-rose-300">BETA {snapshot.teamScores.beta}</span>
+              </div>
+            )}
+
+            {!room.isTrainingMode && room.gameMode === 'koth' && snapshot?.kothZone && (
+              <div
+                data-testid="mode-koth-bar"
+                className="px-2.5 py-0.5 rounded-lg bg-amber-50 border border-amber-400 text-amber-950 font-mono-num text-[10px] sm:text-xs font-bold shadow-sm flex items-center gap-1.5"
+              >
+                <Crown className="w-3.5 h-3.5 text-amber-600" />
+                <span>
+                  {snapshot.kothZone.contested
+                    ? 'CONTESTED!'
+                    : snapshot.kothZone.controllerName
+                    ? `HILL: ${snapshot.kothZone.controllerName}`
+                    : 'CAPTURE HILL'}
+                </span>
+                {snapshot.modeTimer !== null && snapshot.modeTimer !== undefined && (
+                  <span className="text-amber-700">· {Math.ceil(snapshot.modeTimer)}s</span>
+                )}
+              </div>
+            )}
+
+            {!room.isTrainingMode && room.gameMode === 'raid_boss' && (() => {
+              const boss = snapshot?.raidBossId
+                ? actors.find((a) => a.playerId === snapshot.raidBossId)
+                : actors.find((a) => a.isRaidBoss);
+              if (!boss) return null;
+              const bossPct = Math.max(0, Math.min(100, (boss.hp / Math.max(1, boss.maxHp)) * 100));
+              return (
+                <div
+                  data-testid="mode-raid-boss-bar"
+                  className="px-2.5 py-1 rounded-lg bg-slate-950/95 border border-rose-500 text-white font-mono-num text-[10px] shadow-sm flex items-center gap-2 min-w-[170px]"
+                >
+                  <span className="text-rose-300 font-display font-bold truncate">
+                    BOSS {boss.name}
+                  </span>
+                  <div className="h-2 flex-1 bg-slate-800 rounded-full overflow-hidden min-w-[60px]">
+                    <div
+                      className="h-full w-full origin-left bg-gradient-to-r from-rose-500 to-amber-400 transition-transform duration-100"
+                      style={{ transform: `scaleX(${bossPct / 100})` }}
+                    />
+                  </div>
+                  <span className="text-rose-200 font-bold">{boss.hp}</span>
+                </div>
+              );
+            })()}
           </div>
+
+          {/* Active Domain Expansion Banner */}
+          {activeDomain && (
+            <div
+              data-testid="active-domain-banner"
+              className="px-3 py-0.5 rounded-lg bg-slate-950/92 border-2 text-white shadow-sm flex items-center gap-2"
+              style={{ borderColor: DOMAIN_CONFIGS[activeDomain.fighterId]?.primaryCss ?? '#a855f7' }}
+            >
+              <span className="font-manga text-xs tracking-wider text-amber-300">
+                DOMAIN EXPANSION: {activeDomain.domainName.toUpperCase()}
+              </span>
+              <span className="font-mono-num text-[10px] text-sky-200 font-bold">
+                {activeDomain.remaining.toFixed(1)}s
+              </span>
+              {activeDomain.fighterId === 'damen' && (
+                <span className="px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 font-mono-num text-[9px] font-black">
+                  {activeDomain.jackpotActive
+                    ? '★ JACKPOT!'
+                    : `HITS ${Math.min(3, activeDomain.jackpotHits ?? 0)}/3`}
+                </span>
+              )}
+            </div>
+          )}
 
           {outsideStorm && (
             <div className="px-3 py-0.5 rounded-lg bg-rose-600 border border-white text-[10px] sm:text-xs font-display font-bold uppercase tracking-wider text-white">
@@ -2021,6 +2163,54 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
           )}
         </div>
       )}
+
+      {/* DOMAIN CLASH MASH SHOWDOWN OVERLAY */}
+      {room.phase === 'combat' && activeDomainClash && (() => {
+        const dc = activeDomainClash;
+        const p1SharePct = Math.max(8, Math.min(92, 50 - dc.balance * 42));
+        return (
+          <div
+            data-testid="domain-clash-overlay"
+            className="fixed inset-x-0 top-24 z-45 pointer-events-auto flex justify-center px-3"
+          >
+            <div className="w-full max-w-md rounded-2xl bg-slate-950/95 border-2 border-purple-400 p-3.5 text-center text-white shadow-2xl">
+              <div className="font-manga text-lg tracking-widest text-amber-300">
+                DOMAIN CLASH!
+              </div>
+              <div className="flex items-center justify-between text-[11px] font-display font-bold mt-1">
+                <span className="text-sky-300 truncate">{dc.p1Name} ({dc.p1Mashes})</span>
+                <span className="font-mono-num text-amber-300">{dc.remaining.toFixed(1)}s</span>
+                <span className="text-rose-300 truncate">{dc.p2Name} ({dc.p2Mashes})</span>
+              </div>
+              <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden flex my-2 border border-white/40">
+                <div
+                  className="h-full bg-sky-400 transition-all duration-75"
+                  style={{ width: `${p1SharePct}%` }}
+                />
+                <div
+                  className="h-full bg-rose-500 transition-all duration-75"
+                  style={{ width: `${100 - p1SharePct}%` }}
+                />
+              </div>
+              {domainClashInvolvesMe && (
+                <button
+                  type="button"
+                  data-testid="domain-clash-mash-btn"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    soundEngine.unlock();
+                    soundEngine.play('mashTick');
+                    onDomainClashMashRef.current?.();
+                  }}
+                  className="w-full py-2 rounded-xl bg-gradient-to-r from-purple-500 via-fuchsia-500 to-amber-400 border-2 border-white font-manga text-lg tracking-widest text-white shadow-lg cursor-pointer active:scale-95"
+                >
+                  SHATTER BARRIER! [V / SPACE]
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* CENTER-SCREEN REACTION HEADLOCK STRUGGLE BUTTON (Easy Tap/Click Reaction Time) */}
       {room.phase === 'combat' && headlockInvolvesMe && activeHeadlock && (() => {
@@ -2078,6 +2268,29 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
           </div>
         );
       })()}
+
+      {/* JM SKY AUTO-COMBO "SPAM M1!" PROMPT */}
+      {room.phase === 'combat' && myActor?.skyComboPrompt && !myActor.isKO && (
+        <div className="fixed top-[26%] left-1/2 -translate-x-1/2 z-35 pointer-events-auto animate-modal-pop">
+          <button
+            type="button"
+            data-testid="spam-m1-prompt"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              soundEngine.unlock();
+              triggerM1(false);
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+            className="touch-none-select animate-grab-mash px-6 py-2.5 rounded-2xl bg-gradient-to-r from-amber-300 via-yellow-300 to-cyan-300 border-2 border-slate-950 text-slate-950 font-display font-bold text-xl sm:text-3xl tracking-wider shadow-[0_0_24px_rgba(56,189,248,0.8)] flex items-center gap-2.5 cursor-pointer active:scale-95 transition-transform"
+          >
+            <Swords className="w-6 h-6 sm:w-7 sm:h-7 shrink-0 text-slate-950" />
+            <span>SPAM M1!</span>
+            <span className="px-2 py-0.5 rounded-lg bg-slate-950 text-amber-300 font-mono-num text-xs">
+              J / CLICK
+            </span>
+          </button>
+        </div>
+      )}
 
       {/* CLASH QTE SHOWDOWN OVERLAY */}
       {room.phase === 'combat' && clashInvolvesMe && activeClash && (
@@ -2402,7 +2615,10 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
       {room.phase === 'combat' && myActor && !myActor.isKO && (
         <div className="w-full relative flex items-end justify-between pb-1 sm:pb-2 pointer-events-none">
           {/* BOTTOM-LEFT: Virtual Movement Joystick */}
-          <div className="pointer-events-auto pl-0.5 sm:pl-3">
+          <div
+            className="pointer-events-auto pl-0.5 sm:pl-3 origin-bottom-left"
+            style={{ transform: `scale(${hudScale})` }}
+          >
             <div
               data-testid="movement-joystick"
               onPointerDown={handleJoyDown}
@@ -2432,23 +2648,23 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
             </div>
           </div>
 
-          {/* BOTTOM-CENTER: Dedicated Circular Tactical Utility Row (Dash Q, Guard F, Grab G, Jump SPC, Fly R) */}
+          {/* BOTTOM-CENTER: Dedicated Circular Tactical Utility Row (Dash Q, Guard F, Grab G, Jump SPC, Fly E) */}
           <div
             data-testid="utility-bar"
-            className={`pointer-events-auto fixed bottom-1.5 sm:bottom-3 z-20 flex items-center ${
+            className={`pointer-events-auto fixed bottom-1.5 sm:bottom-3 z-20 flex items-center origin-bottom ${
               isNarrowPortrait
-                ? 'left-[44%] -translate-x-1/2 gap-[3px]'
-                : 'left-1/2 -translate-x-1/2 gap-1.5 sm:gap-2.5'
+                ? 'left-[44%] gap-[3px]'
+                : 'left-1/2 gap-1.5 sm:gap-2.5'
             }`}
+            style={{ transform: `translateX(-50%) scale(${hudScale})` }}
           >
-            {/* Dash [Q] */}
+            {/* Dash [Q] — never cancels held skills */}
             <button
               type="button"
               data-testid="dash-btn"
               onPointerDown={(e) => {
                 e.preventDefault();
                 soundEngine.unlock();
-                cancelActiveAim();
                 onDash();
               }}
               onContextMenu={(e) => e.preventDefault()}
@@ -2627,7 +2843,7 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                   data-testid="keybind-E"
                   className="absolute -top-1 -left-1 px-1 py-0.2 rounded-md bg-slate-900 text-white border border-white font-mono-num text-[7px] sm:text-[8px] font-bold leading-tight shadow-xs"
                 >
-                  E
+                  E/R
                 </span>
                 <Feather className={isNarrowPortrait ? 'w-3 h-3' : 'w-3.5 h-3.5 sm:w-4 sm:h-4'} />
                 <span className="text-[7px] sm:text-[8px] font-bold leading-none mt-0.5">
@@ -2640,18 +2856,61 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                 )}
               </button>
             )}
+            {/* Domain Expansion Button [V] */}
+            {onDomainActivate && (() => {
+              const domPct = Math.round(myActor.domainGauge ?? 0);
+              const domReady = domPct >= 100 && (!activeDomain || activeDomain.ownerId !== playerId);
+              const domSpec = DOMAIN_CONFIGS[myActor.fighterId];
+              return (
+                <button
+                  type="button"
+                  data-testid="domain-btn"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    soundEngine.unlock();
+                    if (domainClashInvolvesMe) {
+                      soundEngine.play('mashTick');
+                      onDomainClashMashRef.current?.();
+                    } else {
+                      onDomainActivate();
+                    }
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                  title={`Domain Expansion: ${domSpec.domainName} (${domPct}%)`}
+                  className={`ui-interactive touch-none-select relative rounded-full border-2 flex flex-col items-center justify-center shadow-xs cursor-pointer ${
+                    isNarrowPortrait ? 'w-9 h-9' : isCompactScreen ? 'w-11 h-11' : 'w-14 h-14'
+                  } ${
+                    domReady
+                      ? 'bg-gradient-to-br from-purple-600 via-fuchsia-500 to-amber-400 border-white text-white animate-ready-glow'
+                      : 'bg-slate-900/90 border-purple-500/60 text-purple-200'
+                  }`}
+                >
+                  <span
+                    data-testid="keybind-V"
+                    className="absolute -top-1 -left-1 px-1 py-0.2 rounded-md bg-slate-950 text-purple-200 border border-purple-300 font-mono-num text-[7px] sm:text-[8px] font-bold leading-tight shadow-xs"
+                  >
+                    V
+                  </span>
+                  <Crown className={isNarrowPortrait ? 'w-3 h-3' : 'w-3.5 h-3.5 sm:w-4 sm:h-4'} />
+                  <span className="text-[7px] sm:text-[8px] font-bold leading-none mt-0.5 font-mono-num">
+                    {domReady ? 'DOM' : `${domPct}%`}
+                  </span>
+                </button>
+              );
+            })()}
           </div>
 
           {/* BOTTOM-RIGHT: Large Primary M1 Anchor + Curved MOBA Skill Arc (1 / 2 / 3 + Secret O) */}
           <div
             data-testid="moba-skill-arc"
-            className={`pointer-events-auto relative shrink-0 mr-0.5 sm:mr-3 ${
+            className={`pointer-events-auto relative shrink-0 mr-0.5 sm:mr-3 origin-bottom-right ${
               isNarrowPortrait
                 ? 'w-[126px] h-[124px]'
                 : isCompactScreen
                 ? 'w-[160px] h-[150px]'
                 : 'w-[224px] h-[206px]'
             }`}
+            style={{ transform: `scale(${hudScale})` }}
           >
             {/* Floating Hold-Drag Aim Wheel */}
             {aimOverlay && (
@@ -2837,9 +3096,10 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
               );
             })}
 
-            {/* Awakened Skill 4 (Slot 6, Key R / 4) Sliding Out onto Outer Arc Edge */}
+            {/* Awakened Skill 4 (Slot 6, Key 4 for JM / R for others; Transforms into AIR MG BARRAGE while JM is in Sky Flight!) */}
             {myActor.awakened && (() => {
               const ab4 = getAbilitySpec(myActor.fighterId, 6, true);
+              const isJmAirBarrage = myActor.fighterId === 'jm' && myActor.isFlying;
               const cd = myActor.cooldowns[6] ?? 0;
               const cdPct = Math.min(100, Math.max(0, (cd / Math.max(0.5, ab4.cooldown)) * 100));
               const isSilenced = (myActor.silencedTimer ?? 0) > 0.05;
@@ -2871,7 +3131,9 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                       : 'w-[70px] h-[70px]'
                   } ${
                     ready
-                      ? 'bg-gradient-to-br from-amber-300 via-yellow-400 to-cyan-300 border-white text-slate-950 animate-ready-glow'
+                      ? isJmAirBarrage
+                        ? 'bg-gradient-to-br from-cyan-300 via-sky-400 to-amber-300 border-white text-slate-950 animate-ready-glow'
+                        : 'bg-gradient-to-br from-amber-300 via-yellow-400 to-cyan-300 border-white text-slate-950 animate-ready-glow'
                       : 'bg-slate-200/95 border-slate-400 text-slate-500 opacity-85 brightness-90'
                   }`}
                 >
@@ -2879,12 +3141,21 @@ export const MobileCombatHUD: React.FC<MobileCombatHUDProps> = React.memo(({
                     data-testid="keybind-R"
                     className="absolute -top-1 -left-1 px-1.5 py-0.2 rounded-md bg-slate-950 text-amber-300 border border-amber-300 font-mono-num text-[8px] font-bold leading-tight shadow-xs"
                   >
-                    R
+                    {myActor.fighterId === 'jm' ? '4' : 'R'}
                   </span>
-                  <Flame className={isNarrowPortrait ? 'w-4 h-4' : 'w-5 h-5'} />
+                  {isJmAirBarrage ? (
+                    <Wind className={isNarrowPortrait ? 'w-4 h-4' : 'w-5 h-5'} />
+                  ) : (
+                    <Flame className={isNarrowPortrait ? 'w-4 h-4' : 'w-5 h-5'} />
+                  )}
                   <span className="text-[7px] sm:text-[9px] font-display font-bold leading-none mt-0.5 max-w-[60px] truncate uppercase">
-                    {ab4.name.split(' ')[0]}
+                    {isJmAirBarrage ? 'BARRAGE' : ab4.name.split(' ')[0]}
                   </span>
+                  {isJmAirBarrage && !isNarrowPortrait && (
+                    <span className="text-[6px] sm:text-[7px] font-mono-num font-bold leading-none text-slate-900">
+                      AIR MG
+                    </span>
+                  )}
                   {cd > 0.05 && (
                     <span
                       className="absolute inset-0 rounded-full overflow-hidden flex items-center justify-center"

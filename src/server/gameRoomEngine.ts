@@ -20,8 +20,12 @@ import type {
   ClientMessage,
   CombatEvent,
   CombatMoveType,
+  DomainClashState,
+  DomainExpansionState,
+  GameModeId,
   HeadlockState,
   KoCause,
+  KothZoneState,
   MapId,
   MatchAwakeningPhase,
   ObstacleState,
@@ -31,6 +35,7 @@ import type {
   RoomState,
   ServerMessage,
   SkinId,
+  TeamId,
   TelegraphKind,
   TelegraphState,
   TrainingConfig,
@@ -38,6 +43,7 @@ import type {
 import {
   FIGHTER_BY_ID,
   FIGHTERS,
+  GAME_MODE_BY_ID,
   JM_SECRET_ABILITY,
   MAPS,
   MAP_BY_ID,
@@ -53,9 +59,12 @@ import {
 } from '../shared/gameData.ts';
 import { AWAKENING_CONFIG, getAwakenedAbility } from '../shared/awakeningConfig.ts';
 import {
+  STUN_RECOVERY_IMMUNITY_SEC,
   applyObstacleDamage,
+  canApplyStun,
   computeVolleyProjectileDamage,
   findBestEnemyClusterTarget,
+  resolveCappedStunDuration,
   resolveProjectileHitRadius,
   sanitizeChatText,
   shouldBroadcastMultiplayerSnapshot,
@@ -65,6 +74,7 @@ import {
   substepMotionAndCollision,
 } from '../game/combatMath.ts';
 import { computeAbilityResourceCost, resolveActorBaseMoveSpeed } from '../game/awakeningLogic.ts';
+import { addDomainCharge, areActorsAllied } from '../game/domainLogic.ts';
 import {
   type DummyDpsTracker,
   createDummyDpsTracker,
@@ -78,6 +88,8 @@ import type {
   AwakeningRoomState,
 } from './awakeningEngine.ts';
 import {
+  applyDirectStun,
+  awakenActorImmediate,
   cancelCutsceneGracefully,
   executeAwakenedAbilityImpact,
   handleAwakeningDebug,
@@ -85,11 +97,28 @@ import {
   resetRoomAwakeningState,
   resolveCutsceneClash,
   setupAwakenedAbilityWindup,
+  skipCutsceneToClash,
   syncCutsceneAudioClock,
   tickAwakenedChannel,
   tickAwakenedZoneBehavior,
   tickAwakeningRoom,
 } from './awakeningEngine.ts';
+import {
+  canJmCancelM1,
+  computeParryBlinkBehind,
+  resolveJmBaseSkill2Mode,
+  shouldKeepFlightDuringChannel,
+} from '../game/jmComboLogic.ts';
+import {
+  type DomainModeRoomState,
+  createInitialKothZone,
+  getDomainChargeMultiplier,
+  getModeAbilityCooldownFactor,
+  handleDomainActivate,
+  handleDomainClashMash,
+  registerDamenDomainBulletHit,
+  tickDomainAndModes,
+} from './domainEngine.ts';
 
 const STANDALONE_DASH_COOLDOWN = 1.5;
 
@@ -150,11 +179,12 @@ interface InternalBattleEvent extends BattlefieldEventState {
   hazardDetonated: boolean;
 }
 
-interface RoomInstance extends AwakeningRoomState {
+interface RoomInstance extends DomainModeRoomState {
   roomCode: string;
   hostId: string;
   phase: RoomState['phase'];
   mapId: MapId;
+  gameMode: GameModeId;
   isSoloPractice: boolean;
   isTrainingMode: boolean;
   trainingConfig: TrainingConfig;
@@ -178,6 +208,12 @@ interface RoomInstance extends AwakeningRoomState {
   eventRotationIdx: number;
   activeClash: ClashState | null;
   activeHeadlock: HeadlockState | null;
+  activeDomain: DomainExpansionState | null;
+  activeDomainClash: (DomainClashState & { p1Overdrive?: number }) | null;
+  kothZone: KothZoneState | null;
+  teamScores: { alpha: number; beta: number };
+  modeTimer: number;
+  raidBossId: string | null;
   stormActive: boolean;
   stormRadius: number;
   stormMaxRadius: number;
@@ -306,6 +342,7 @@ export class GameRoomEngine {
       hostId: room.hostId,
       phase: room.phase,
       mapId: room.mapId,
+      gameMode: room.gameMode,
       isSoloPractice: room.isSoloPractice,
       isTrainingMode: room.isTrainingMode,
       trainingConfig: { ...room.trainingConfig },
@@ -326,6 +363,7 @@ export class GameRoomEngine {
         wins: p.wins,
         isBot: p.isBot,
         isDummy: p.isDummy,
+        team: p.team,
       })),
     };
   }
@@ -355,18 +393,21 @@ export class GameRoomEngine {
 
       const isTrainingMode = Boolean(msg.isTrainingMode);
       const isSolo = Boolean(msg.isSoloPractice) && !isTrainingMode;
+      const gameMode: GameModeId =
+        !isTrainingMode && msg.gameMode && GAME_MODE_BY_ID[msg.gameMode] ? msg.gameMode : 'classic';
       const room: RoomInstance = {
         roomCode: code,
         hostId: playerId,
         phase: 'lobby',
         mapId: 'shibuya',
+        gameMode,
         isSoloPractice: isSolo,
         isTrainingMode,
         trainingConfig: { dummyEnabled: false, zeroCooldowns: false },
         countdown: 2.0,
         matchTime: 0,
         roundNumber: 1,
-        winsToWin: isSolo || isTrainingMode ? 1 : 3,
+        winsToWin: isSolo || isTrainingMode || gameMode !== 'classic' ? 1 : 3,
         roundWinnerId: null,
         victoryDelayTimer: 0,
         winnerId: null,
@@ -396,6 +437,12 @@ export class GameRoomEngine {
         eventRotationIdx: 0,
         activeClash: null,
         activeHeadlock: null,
+        activeDomain: null,
+        activeDomainClash: null,
+        kothZone: null,
+        teamScores: { alpha: 0, beta: 0 },
+        modeTimer: gameMode === 'koth' ? 180.0 : 0,
+        raidBossId: null,
         stormActive: false,
         stormRadius: MAP_BY_ID.shibuya.arenaRadius,
         stormMaxRadius: MAP_BY_ID.shibuya.arenaRadius,
@@ -583,6 +630,17 @@ export class GameRoomEngine {
       return;
     }
 
+    if (msg.type === 'room:selectMode') {
+      if (room.phase !== 'lobby' || room.isTrainingMode) return;
+      if (player.playerId !== room.hostId) return;
+      if (GAME_MODE_BY_ID[msg.gameMode]) {
+        room.gameMode = msg.gameMode;
+        room.winsToWin = room.isSoloPractice || room.isTrainingMode || room.gameMode !== 'classic' ? 1 : 3;
+        this.broadcastRoomState(room);
+      }
+      return;
+    }
+
     if (msg.type === 'room:setReady') {
       if (room.phase !== 'lobby') return;
       player.ready = Boolean(msg.ready);
@@ -621,6 +679,12 @@ export class GameRoomEngine {
       room.battleEvent = null;
       room.activeClash = null;
       room.activeHeadlock = null;
+      room.activeDomain = null;
+      room.activeDomainClash = null;
+      room.kothZone = null;
+      room.teamScores = { alpha: 0, beta: 0 };
+      room.modeTimer = room.gameMode === 'koth' ? 180.0 : 0;
+      room.raidBossId = null;
       room.stormActive = false;
       room.stormMaxRadius = MAP_BY_ID[room.mapId].arenaRadius;
       room.stormRadius = room.stormMaxRadius;
@@ -631,6 +695,7 @@ export class GameRoomEngine {
       for (const p of room.players) {
         p.ready = false;
         p.wins = 0;
+        p.team = undefined;
       }
       this.broadcastRoomState(room);
       return;
@@ -644,13 +709,29 @@ export class GameRoomEngine {
 
     if (msg.type === 'game:awakeningSkip') {
       if (room.phase !== 'combat' || !AWAKENING_CONFIG.ALLOW_SKIP) return;
-      resolveCutsceneClash(room, this.getAwakeningHelpers(), true);
+      skipCutsceneToClash(room, this.getAwakeningHelpers());
       return;
     }
 
     if (msg.type === 'game:cutsceneSync') {
       if (room.phase !== 'combat') return;
       syncCutsceneAudioClock(room, player.playerId, msg.clockSec, this.getAwakeningHelpers());
+      return;
+    }
+
+    if (msg.type === 'game:domainActivate') {
+      if (room.phase !== 'combat' || room.awakeningPhase === 'CUTSCENE') return;
+      const actor = room.actors.find((a) => a.playerId === player.playerId);
+      if (!actor) return;
+      if (handleDomainActivate(room, actor, this.getAwakeningHelpers())) {
+        this.broadcastSnapshot(room);
+      }
+      return;
+    }
+
+    if (msg.type === 'game:domainClashMash') {
+      if (room.phase !== 'combat' || !room.activeDomainClash) return;
+      handleDomainClashMash(room, player.playerId, this.getAwakeningHelpers(), msg.side);
       return;
     }
 
@@ -936,7 +1017,9 @@ export class GameRoomEngine {
     rotY: number
   ): InternalActor {
     const spec = FIGHTER_BY_ID[p.fighterId];
-    const maxHp = p.isDummy ? 9999 : spec.maxHp;
+    const isRaidBoss = p.team === 'boss';
+    const maxHp = p.isDummy ? 9999 : isRaidBoss ? Math.round(spec.maxHp * 3.5) : spec.maxHp;
+    const isSuddenDeath = room.gameMode === 'sudden_death' && !p.isDummy;
     return {
       playerId: p.playerId,
       slotIndex: p.slotIndex,
@@ -945,6 +1028,8 @@ export class GameRoomEngine {
       skinId: p.skinId ?? 'classic',
       isBot: p.isBot,
       isDummy: p.isDummy,
+      team: p.team,
+      isRaidBoss,
       x,
       y: 0,
       z,
@@ -955,12 +1040,16 @@ export class GameRoomEngine {
       rotY,
       hp: maxHp,
       maxHp,
-      mana: p.isDummy ? 0 : 45,
+      mana: p.isDummy ? 0 : isSuddenDeath ? spec.maxMana : 45,
       maxMana: spec.maxMana,
       stamina: spec.maxStamina,
       maxStamina: spec.maxStamina,
       stagger: 0,
       isStunned: false,
+      stunImmunityTimer: 0,
+      domainGauge: isSuddenDeath ? 100 : 0,
+      domainJackpotActive: false,
+      domainJackpotHits: 0,
       isOverdrive: false,
       passiveStacks: 0,
       counterFlowActive: false,
@@ -1003,11 +1092,16 @@ export class GameRoomEngine {
       channelTargetX: x,
       channelTargetZ: z,
       stunnedTimer: 0,
+      skyComboPrompt: false,
+      skyComboStep: 0,
+      skyComboMashes: 0,
+      skyComboTargetId: null,
       isKO: false,
       koTime: null,
       koStyle: spec.koStyle,
       wins: p.wins,
       kills: 0,
+      deaths: 0,
       parryCount: 0,
       damageDealt: 0,
       dummyDpsTracker: p.isDummy ? createDummyDpsTracker() : undefined,
@@ -1106,10 +1200,16 @@ export class GameRoomEngine {
     room.eventRotationIdx = 0;
     room.activeClash = null;
     room.activeHeadlock = null;
-    room.stormActive = false;
+    room.activeDomain = null;
+    room.activeDomainClash = null;
+    room.teamScores = { alpha: 0, beta: 0 };
+    room.kothZone = room.gameMode === 'koth' ? createInitialKothZone() : null;
+    room.modeTimer = room.gameMode === 'koth' ? 180.0 : 0;
+    room.raidBossId = null;
+    room.stormActive = room.gameMode === 'sudden_death';
     room.stormMaxRadius = MAP_BY_ID[room.mapId].arenaRadius;
     room.stormRadius = room.stormMaxRadius;
-    room.stormTickTimer = 0;
+    room.stormTickTimer = room.gameMode === 'sudden_death' ? 0.5 : 0;
     room.pendingEvents = [];
     room.lastInputSeq = {};
     resetRoomAwakeningState(room);
@@ -1127,22 +1227,8 @@ export class GameRoomEngine {
       respawnTimer: 0,
     }));
 
-    const participants: RoomPlayer[] = [...room.players];
-    if (room.isSoloPractice) {
-      const playerFighter = room.players[0]?.fighterId ?? 'jm';
-      const dummyFighter = FIGHTERS.find((f) => f.id !== playerFighter)?.id ?? 'prime';
-      participants.push({
-        playerId: 'bot-dummy',
-        slotIndex: 1,
-        name: `${FIGHTER_BY_ID[dummyFighter].name} (Bot)`,
-        fighterId: dummyFighter,
-        skinId: 'classic',
-        ready: true,
-        connected: true,
-        wins: 0,
-        isBot: true,
-      });
-    } else if (room.isTrainingMode && room.trainingConfig.dummyEnabled) {
+    const participants: RoomPlayer[] = room.players.map((p) => ({ ...p, team: undefined }));
+    if (room.isTrainingMode && room.trainingConfig.dummyEnabled) {
       participants.push({
         playerId: 'training-dummy',
         slotIndex: 1,
@@ -1155,6 +1241,70 @@ export class GameRoomEngine {
         isBot: true,
         isDummy: true,
       });
+    } else if (!room.isTrainingMode) {
+      if (room.gameMode === 'raid_boss') {
+        while (participants.length < 5) {
+          const idx = participants.length;
+          const usedFighters = new Set(participants.map((p) => p.fighterId));
+          const botFighter = FIGHTERS.find((f) => !usedFighters.has(f.id))?.id ?? FIGHTERS[idx % FIGHTERS.length].id;
+          participants.push({
+            playerId: `bot-raider-${idx}`,
+            slotIndex: idx,
+            name: `${FIGHTER_BY_ID[botFighter].name} (Raider)`,
+            fighterId: botFighter,
+            skinId: 'classic',
+            ready: true,
+            connected: true,
+            wins: 0,
+            isBot: true,
+          });
+        }
+        participants.forEach((p, idx) => {
+          p.team = idx === 0 ? 'boss' : 'raiders';
+        });
+      } else if (room.gameMode === 'squad_clash') {
+        while (participants.length < 4) {
+          const idx = participants.length;
+          const usedFighters = new Set(participants.map((p) => p.fighterId));
+          const botFighter = FIGHTERS.find((f) => !usedFighters.has(f.id))?.id ?? FIGHTERS[idx % FIGHTERS.length].id;
+          participants.push({
+            playerId: `bot-squad-${idx}`,
+            slotIndex: idx,
+            name: `${FIGHTER_BY_ID[botFighter].name} (Bot)`,
+            fighterId: botFighter,
+            skinId: 'classic',
+            ready: true,
+            connected: true,
+            wins: 0,
+            isBot: true,
+          });
+        }
+        participants.forEach((p, idx) => {
+          p.team = idx % 2 === 0 ? 'alpha' : 'beta';
+        });
+      } else if (room.isSoloPractice || participants.length < 2) {
+        if (room.isSoloPractice) {
+          const playerFighter = room.players[0]?.fighterId ?? 'jm';
+          const dummyFighter = FIGHTERS.find((f) => f.id !== playerFighter)?.id ?? 'prime';
+          participants.push({
+            playerId: 'bot-dummy',
+            slotIndex: 1,
+            name: `${FIGHTER_BY_ID[dummyFighter].name} (Bot)`,
+            fighterId: dummyFighter,
+            skinId: 'classic',
+            ready: true,
+            connected: true,
+            wins: 0,
+            isBot: true,
+          });
+        }
+      }
+    }
+
+    // Sync room.players team assignments for HUD scoreboard readability
+    for (const rp of room.players) {
+      const match = participants.find((p) => p.playerId === rp.playerId);
+      rp.team = match?.team;
     }
 
     const total = participants.length;
@@ -1171,6 +1321,25 @@ export class GameRoomEngine {
       return this.createActorFromParticipant(room, p, safe.x, safe.z, rotY);
     });
     room.initialActorCount = room.actors.filter((a) => !a.isDummy).length;
+
+    const helpers = this.getAwakeningHelpers();
+    if (room.gameMode === 'raid_boss') {
+      const bossActor = room.actors.find((a) => a.team === 'boss');
+      if (bossActor) {
+        room.raidBossId = bossActor.playerId;
+        awakenActorImmediate(room, bossActor, helpers, false);
+        room.awakeningPhase = 'AWAKENED_DUEL';
+      }
+    } else if (room.gameMode === 'sudden_death') {
+      room.awakeningPhase = 'AWAKENED_DUEL';
+      for (const a of room.actors) {
+        if (!a.isDummy) {
+          a.domainGauge = 100;
+          awakenActorImmediate(room, a, helpers, false);
+        }
+      }
+    }
+
     this.broadcastRoomState(room);
     this.broadcastSnapshot(room, true);
   }
@@ -1223,7 +1392,9 @@ export class GameRoomEngine {
   }
 
   private findNearestTarget(room: RoomInstance, actor: InternalActor, maxRange: number): InternalActor | null {
-    const alive = room.actors.filter((a) => a.playerId !== actor.playerId && !a.isKO);
+    const alive = room.actors.filter(
+      (a) => a.playerId !== actor.playerId && !a.isKO && !areActorsAllied(actor, a, room.gameMode)
+    );
     if (alive.length === 0) return null;
     let best: InternalActor | null = null;
     let bestDist = maxRange;
@@ -1238,7 +1409,9 @@ export class GameRoomEngine {
   }
 
   private findPreferredTarget(room: RoomInstance, actor: InternalActor, maxRange: number): InternalActor | null {
-    const alive = room.actors.filter((a) => a.playerId !== actor.playerId && !a.isKO);
+    const alive = room.actors.filter(
+      (a) => a.playerId !== actor.playerId && !a.isKO && !areActorsAllied(actor, a, room.gameMode)
+    );
     if (alive.length === 0) return null;
 
     if (actor.targetId) {
@@ -1303,11 +1476,17 @@ export class GameRoomEngine {
 
     this.clearActorTelegraph(room, actor);
     actor.stamina = clamp(actor.stamina - dashStamina, 0, actor.maxStamina);
-    actor.dashCooldown = STANDALONE_DASH_COOLDOWN;
+    const inKhenVoid =
+      room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'khen';
+    actor.dashCooldown = inKhenVoid ? STANDALONE_DASH_COOLDOWN * 0.3 : STANDALONE_DASH_COOLDOWN;
     actor.shieldActive = false;
     actor.parryWindow = false;
     actor.blockHeld = false;
     actor.superArmor = false;
+    if (canJmCancelM1(actor.fighterId, actor.actionState, actor.comboStep, 'dash')) {
+      actor.windupTriggered = true;
+      actor.landedCurrentAction = true;
+    }
     actor.abilitySlot = null;
 
     const mx = typeof rawMoveX === 'number' && Number.isFinite(rawMoveX) ? rawMoveX : actor.moveX;
@@ -1402,12 +1581,12 @@ export class GameRoomEngine {
 
     actor.actionState = 'grab';
     actor.abilitySlot = null;
-    actor.actionDuration = 0.34;
-    actor.actionTimer = 0.34;
+    actor.actionDuration = 0.17;
+    actor.actionTimer = 0.17;
     actor.windupTriggered = false;
     actor.landedCurrentAction = false;
-    actor.vx = Math.sin(actor.rotY) * 10.5;
-    actor.vz = Math.cos(actor.rotY) * 10.5;
+    actor.vx = Math.sin(actor.rotY) * 12.5;
+    actor.vz = Math.cos(actor.rotY) * 12.5;
   }
 
   private executeGrabImpact(room: RoomInstance, actor: InternalActor): void {
@@ -1420,6 +1599,7 @@ export class GameRoomEngine {
       if (
         target.playerId === actor.playerId ||
         target.isKO ||
+        areActorsAllied(actor, target, room.gameMode) ||
         target.actionState === 'clash' ||
         target.actionState === 'headlock'
       ) {
@@ -1437,9 +1617,10 @@ export class GameRoomEngine {
 
       // RPS Rule: Strike beats Grab! If target is actively swinging/casting strike, grabber gets stuffed!
       if (target.actionState === 'attack' || target.actionState === 'skill') {
+        const stuffDur = resolveCappedStunDuration(0.55, false);
         actor.actionState = 'stagger';
-        actor.actionTimer = 0.6;
-        actor.actionDuration = 0.6;
+        actor.actionTimer = stuffDur;
+        actor.actionDuration = stuffDur;
         actor.vx = -dirX * 7.0;
         actor.vz = -dirZ * 7.0;
         actor.landedCurrentAction = true;
@@ -1942,6 +2123,82 @@ export class GameRoomEngine {
           );
         }
       }
+      return;
+    }
+
+    if (actor.fighterId === 'jm') {
+      // Stage 2: METEOR HEEL DROP — dives/slams down with crisp ground-bounce true-comboing into Solar Dragon Beam!
+      const foe = this.findPreferredTarget(room, actor, 10.5);
+      if (foe) {
+        actor.rotY = Math.atan2(foe.x - actor.x, foe.z - actor.z);
+      }
+      const fx = Math.sin(actor.rotY);
+      const fz = Math.cos(actor.rotY);
+      const impactX = foe ? foe.x : actor.x + fx * 1.8;
+      const impactZ = foe ? foe.z : actor.z + fz * 1.8;
+      const floorY = getObstacleSupportY(room.mapId, impactX, 0, impactZ, 0.42, room.obstacles);
+      const safe = resolveObstacleCollisions(room.mapId, impactX - fx * 1.1, floorY, impactZ - fz * 1.1, 0.48, room.obstacles);
+      actor.x = safe.x;
+      actor.z = safe.z;
+      actor.y = floorY;
+      actor.yVel = 0;
+      actor.vx = 0;
+      actor.vz = 0;
+      actor.grounded = true;
+      actor.actionState = 'skill';
+      actor.actionDuration = 0.34;
+      actor.actionTimer = 0.34;
+      actor.windupTriggered = true;
+      actor.landedCurrentAction = true;
+      this.damageObstaclesInArea(room, impactX, impactZ, 4.4, 28, spec.hex);
+      this.pushEvent(room, {
+        kind: 'craterSlam',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: impactX,
+        y: floorY + 0.3,
+        z: impactZ,
+        dirX: fx,
+        dirZ: fz,
+        radius: 4.4,
+        colorHex: spec.hex,
+        abilitySlot: 3,
+        isComboLink: true,
+        hitStopMs: 65,
+        callout: 'METEOR HEEL DROP!',
+      });
+      for (const target of room.actors) {
+        if (target.playerId === actor.playerId || target.isKO) continue;
+        const d = Math.hypot(target.x - impactX, target.z - impactZ);
+        if (d <= 4.6 && Math.abs(target.y - floorY) <= 6.5) {
+          const calc = this.computeDynamicDamage(actor, target, 22, 3);
+          const hit = this.applyHit(
+            room,
+            actor,
+            target,
+            calc.dmg,
+            30 + calc.staggerBonus,
+            1.4,
+            fx,
+            fz,
+            spec.hex,
+            true,
+            false,
+            false,
+            calc.isCrit,
+            calc.isBackstab
+          );
+          if (hit) {
+            target.y = floorY + 0.25;
+            target.yVel = 4.6;
+            target.grounded = false;
+            target.vx = fx * 1.5;
+            target.vz = fz * 1.5;
+            applyDirectStun(target, 0.62, false);
+          }
+        }
+      }
+      return;
     }
   }
 
@@ -1955,12 +2212,26 @@ export class GameRoomEngine {
     isHoldVariant = false
   ): void {
     if (room.awakeningPhase === 'CUTSCENE') return;
+    if (actor.channelKind === 'jm_sky_peak' && slot === 0 && !actor.isKO) {
+      actor.skyComboMashes = (actor.skyComboMashes ?? 0) + 1;
+      this.pushEvent(room, {
+        kind: 'skyComboStep',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x,
+        y: actor.y + 1.15,
+        z: actor.z,
+        colorHex: 0xfef08a,
+        abilitySlot: 4,
+      });
+      return;
+    }
     if (actor.isKO || actor.channelKind !== null || actor.actionState === 'clash' || actor.actionState === 'whiff' || actor.actionState === 'headlock') return;
     if (actor.actionState === 'stagger') return;
     if (actor.silencedTimer > 0 && slot >= 2) return;
     if (slot === 6 && !actor.awakened) return;
 
-    // Stage 2 Multi-Stage Skill execution (e.g. Skyburst Launch, Crater Slam, Shadow Swap)
+    // Stage 2 Multi-Stage Skill execution (e.g. Skyburst Launch, Crater Slam, Shadow Swap, JM Meteor Heel Drop)
     if (!actor.awakened && slot === 3 && actor.stage2Slot === 3 && actor.stage2Timer > 0 && actor.cooldowns[3] <= 0.01) {
       if (actor.stamina >= 10) {
         this.executeStage2Skill(room, actor);
@@ -1968,11 +2239,13 @@ export class GameRoomEngine {
       return;
     }
 
-    // Combo-into-Skill Cancel: allow cancelling M1 step 2/3/4 (or late M1) directly into Skill 1/2/4!
+    // Combo-into-Skill Cancel: JM M1 hits 1-3 cancel immediately into Skill 1/2 with zero delay; others retain late-M1 cancel
+    const jmInstantCancel = canJmCancelM1(actor.fighterId, actor.actionState, actor.comboStep, slot);
     const canCancelM1IntoSkill =
-      actor.actionState === 'attack' &&
-      (slot === 2 || slot === 3 || slot === 6) &&
-      (actor.comboStep >= 2 || actor.actionTimer <= 0.16);
+      jmInstantCancel ||
+      (actor.actionState === 'attack' &&
+        (slot === 2 || slot === 3 || slot === 6) &&
+        (actor.comboStep >= 2 || actor.actionTimer <= 0.16));
 
     if (
       !canCancelM1IntoSkill &&
@@ -2006,7 +2279,7 @@ export class GameRoomEngine {
       ? JM_SECRET_ABILITY
       : spec.abilities[baseIdx];
 
-    const { reqMana, reqStam } = computeAbilityResourceCost(
+    const costRes = computeAbilityResourceCost(
       { manaCost: ab.manaCost, staminaCost: ab.staminaCost },
       {
         awakened: actor.awakened,
@@ -2015,6 +2288,17 @@ export class GameRoomEngine {
         holdHeavy,
       }
     );
+    const isJmSanctuaryUlt =
+      actor.fighterId === 'jm' &&
+      slot === 6 &&
+      room.activeDomain?.ownerId === actor.playerId &&
+      room.activeDomain.fighterId === 'jm';
+    const isDamenJackpot =
+      actor.fighterId === 'damen' &&
+      Boolean(actor.domainJackpotActive) &&
+      room.activeDomain?.ownerId === actor.playerId;
+    const reqMana = isJmSanctuaryUlt || isDamenJackpot ? 0 : costRes.reqMana;
+    const reqStam = isDamenJackpot ? 0 : costRes.reqStam;
 
     if (actor.mana < reqMana || actor.stamina < reqStam) return;
 
@@ -2108,22 +2392,42 @@ export class GameRoomEngine {
 
     const zeroCdActive = room.isTrainingMode && room.trainingConfig.zeroCooldowns && !actor.isBot;
 
+    const jmBaseSkill2Stage =
+      !actor.awakened && slot === 3 && actor.fighterId === 'jm' && !isHoldVariant
+        ? resolveJmBaseSkill2Mode({
+            awakened: actor.awakened,
+            isFlying: actor.isFlying,
+            grounded: actor.grounded,
+            stage2Slot: actor.stage2Slot,
+            stage2Timer: actor.stage2Timer,
+            nearbyAirborneTarget: Boolean(target && !target.grounded),
+          })
+        : null;
+
+    if (jmBaseSkill2Stage === 'meteor_heel_drop') {
+      actor.stage2PendingCooldown = zeroCdActive ? 0 : cd * getModeAbilityCooldownFactor(room, actor);
+      this.executeStage2Skill(room, actor);
+      return;
+    }
+
     const opensStage2 =
       !actor.awakened &&
       slot === 3 &&
       ((actor.fighterId === 'prime' && !isHoldVariant) ||
         actor.fighterId === 'marjohn' ||
-        actor.fighterId === 'khen');
+        actor.fighterId === 'khen' ||
+        (actor.fighterId === 'jm' && jmBaseSkill2Stage === 'rising_kick'));
 
+    const modeCdFactor = getModeAbilityCooldownFactor(room, actor);
     if (opensStage2) {
-      actor.cooldowns[3] = zeroCdActive ? 0 : 0.3;
+      actor.cooldowns[3] = zeroCdActive ? 0 : 0.28;
       actor.stage2Slot = 3;
-      actor.stage2Timer = actor.fighterId === 'marjohn' ? 3.8 : actor.fighterId === 'khen' ? 3.4 : 2.5;
+      actor.stage2Timer = actor.fighterId === 'marjohn' ? 3.8 : actor.fighterId === 'khen' ? 3.4 : actor.fighterId === 'jm' ? 3.2 : 2.5;
       actor.stage2Label = ab.stage2Label ?? 'FOLLOW-UP';
-      actor.stage2PendingCooldown = zeroCdActive ? 0 : cd;
+      actor.stage2PendingCooldown = zeroCdActive ? 0 : cd * modeCdFactor;
     } else {
       const krenFrenzyCd = actor.fighterId === 'khen' && actor.frenzyInside && slot >= 2 ? 0.75 : 1.0;
-      actor.cooldowns[slot] = zeroCdActive ? 0 : cd * krenFrenzyCd;
+      actor.cooldowns[slot] = zeroCdActive ? 0 : cd * krenFrenzyCd * modeCdFactor;
       if (slot === 3) {
         actor.stage2Slot = null;
         actor.stage2Timer = 0;
@@ -2707,9 +3011,12 @@ export class GameRoomEngine {
     loser.vz = nz * 13.5;
     loser.yVel = 6.0;
     loser.grounded = false;
-    loser.actionState = 'stagger';
-    loser.actionTimer = 0.85;
-    loser.actionDuration = 0.85;
+    if (canApplyStun(loser.stunImmunityTimer)) {
+      const clashStun = resolveCappedStunDuration(0.75, true);
+      loser.actionState = 'stagger';
+      loser.actionTimer = clashStun;
+      loser.actionDuration = clashStun;
+    }
     this.addStagger(room, winner, loser, 42);
 
     this.pushEvent(room, {
@@ -2735,7 +3042,7 @@ export class GameRoomEngine {
   }
 
   private addStagger(room: RoomInstance, attacker: InternalActor, target: InternalActor, amount: number): void {
-    if (target.isKO || target.isStunned) return;
+    if (target.isKO || target.isStunned || !canApplyStun(target.stunImmunityTimer)) return;
     let mult = 1.0;
     if (target.actionState === 'whiff') mult *= 1.4;
     // Prime Blaze Fury armor grants light stagger resistance during swings
@@ -2744,11 +3051,12 @@ export class GameRoomEngine {
     }
     target.stagger = clamp(target.stagger + Math.round(amount * mult), 0, 100);
     if (target.stagger >= 100) {
+      const stunDur = resolveCappedStunDuration(0.75, false);
       target.stagger = 100;
       target.isStunned = true;
       target.actionState = 'stagger';
-      target.actionTimer = 1.65;
-      target.actionDuration = 1.65;
+      target.actionTimer = stunDur;
+      target.actionDuration = stunDur;
       target.shieldActive = false;
       target.parryWindow = false;
       this.pushEvent(room, {
@@ -3061,6 +3369,8 @@ export class GameRoomEngine {
         // Outlaw Roll -> Deadeye Fan Shot (3-shot burst with volley scaling)
         actor.empoweredM1Ready = true;
         const volleyHitCounts = new Map<string, number>();
+        const inDamenDomain =
+          room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen';
         for (const spread of [-0.16, 0, 0.16]) {
           const ang = actor.rotY + spread;
           room.projectiles.push({
@@ -3080,6 +3390,7 @@ export class GameRoomEngine {
             originZ: actor.z,
             isComboLink: actor.pendingComboLink,
             isOverdrive: actor.isOverdrive,
+            isHoming: inDamenDomain,
             age: 0,
             maxAge: 0.48,
             maxRange: 11.4,
@@ -3152,7 +3463,7 @@ export class GameRoomEngine {
       }
 
       if (actor.fighterId === 'jm') {
-        // Flash Step: golden blink along corridor (can also dive diagonally if JM is airborne!)
+        // Flash Step Stagger: palm-ring afterimage + spiraling wind streak + crater-cracking palm burst leaving enemy right in front of JM!
         const originX = actor.x;
         const originY = actor.y;
         const originZ = actor.z;
@@ -3165,7 +3476,7 @@ export class GameRoomEngine {
         }
         this.damageObstaclesInArea(room, actor.x, actor.z, 3.6, ab.damage * 1.35, spec.hex);
         this.pushEvent(room, {
-          kind: 'shockwave',
+          kind: 'dash',
           attackerId: actor.playerId,
           fighterId: 'jm',
           x: actor.x,
@@ -3178,13 +3489,31 @@ export class GameRoomEngine {
           dirZ: fz,
           colorHex: spec.hex,
           abilitySlot: 2,
+        });
+        this.pushEvent(room, {
+          kind: 'craterSlam',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x + fx * 0.7,
+          y: actor.y + 0.3,
+          z: actor.z + fz * 0.7,
+          originX,
+          originY: originY + 0.9,
+          originZ,
+          dirX: fx,
+          dirZ: fz,
+          radius: 3.4,
+          colorHex: spec.hex,
+          abilitySlot: 2,
           isComboLink: true,
+          callout: 'FLASH STEP!',
         });
         const segX = actor.x - originX;
         const segZ = actor.z - originZ;
         const segLen = Math.max(0.1, Math.hypot(segX, segZ));
         const sDirX = segX / segLen;
         const sDirZ = segZ / segLen;
+        let primaryHitTarget: InternalActor | null = null;
         for (const target of room.actors) {
           if (target.playerId === actor.playerId || target.isKO) continue;
           const dx = target.x - originX;
@@ -3193,10 +3522,27 @@ export class GameRoomEngine {
           const perp = Math.abs(dx * -sDirZ + dz * sDirX);
           if (along >= -0.8 && along <= segLen + 1.8 && perp <= 2.35 && Math.abs(target.y - actor.y) <= 4.5) {
             const calc = this.computeDynamicDamage(actor, target, ab.damage, 2);
-            if (this.applyHit(room, actor, target, calc.dmg, ab.staggerDamage + calc.staggerBonus, ab.knockback, sDirX, sDirZ, spec.hex, true, false, false, calc.isCrit, calc.isBackstab)) {
+            if (this.applyHit(room, actor, target, calc.dmg, ab.staggerDamage + calc.staggerBonus, 0.6, sDirX, sDirZ, spec.hex, true, false, false, calc.isCrit, calc.isBackstab)) {
               actor.landedCurrentAction = true;
+              target.vx = 0;
+              target.vz = 0;
+              applyDirectStun(target, 0.68, false);
+              if (!primaryHitTarget) primaryHitTarget = target;
             }
           }
+        }
+        if (primaryHitTarget) {
+          const place = resolveObstacleCollisions(
+            room.mapId,
+            primaryHitTarget.x - sDirX * 1.55,
+            actor.y,
+            primaryHitTarget.z - sDirZ * 1.55,
+            0.48,
+            room.obstacles
+          );
+          actor.x = place.x;
+          actor.z = place.z;
+          actor.rotY = Math.atan2(primaryHitTarget.x - actor.x, primaryHitTarget.z - actor.z);
         }
         return;
       }
@@ -3204,7 +3550,7 @@ export class GameRoomEngine {
 
     // SIGNATURE M1 PATTERNS (slot === 0)
     if (slot === 0) {
-      // 1. MARJOHN: Ranged Tornado Poke (steady mid-range ~7.6m projectile)
+      // 1. MARJOHN: Ranged Wind-Blade / Tornado Poke (buffed velocity & scaling)
       if (actor.fighterId === 'marjohn') {
         room.projectiles.push({
           id: makeId('proj'),
@@ -3214,8 +3560,8 @@ export class GameRoomEngine {
           x: actor.x + fx * 0.95,
           y: actor.y + 0.95,
           z: actor.z + fz * 0.95,
-          vx: fx * 11.5,
-          vz: fz * 11.5,
+          vx: fx * 17.5,
+          vz: fz * 17.5,
           rotY: actor.rotY,
           colorHex: spec.hex,
           originX: actor.x,
@@ -3223,10 +3569,10 @@ export class GameRoomEngine {
           originZ: actor.z,
           isOverdrive: actor.isOverdrive,
           age: 0,
-          maxAge: 0.72,
-          maxRange: 7.6,
-          damage: 12,
-          staggerDamage: 15,
+          maxAge: 0.6,
+          maxRange: 8.6,
+          damage: 14,
+          staggerDamage: 16,
           knockback: 4.5,
           hitIds: new Set(),
         });
@@ -3234,10 +3580,12 @@ export class GameRoomEngine {
         return;
       }
 
-      // 2. DAMEN: Gun (strict 9.8m range cap, measured revolver speed & damage)
+      // 2. DAMEN: Gun (strict 9.8m range cap; Sure-Hit tracking inside Idle Deadeye Gamble)
       if (actor.fighterId === 'damen') {
         const isDeadeye = Boolean(actor.empoweredM1Ready);
         if (isDeadeye) actor.empoweredM1Ready = false;
+        const inDamenDomain =
+          room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen';
         room.projectiles.push({
           id: makeId('proj'),
           ownerId: actor.playerId,
@@ -3254,6 +3602,7 @@ export class GameRoomEngine {
           originY: actor.y + 1.15,
           originZ: actor.z,
           isOverdrive: isDeadeye || actor.isOverdrive,
+          isHoming: inDamenDomain,
           age: 0,
           maxAge: 0.58,
           maxRange: 9.8,
@@ -3329,8 +3678,22 @@ export class GameRoomEngine {
         return;
       }
 
-      // 4. JM GROUND 3rd Hit: Mini Energy Beam (Kamehameha)
+      // 4. JM GROUND 3rd Hit: Crescent Slash + Mini Energy Beam
       if (actor.fighterId === 'jm' && actor.comboStep === 3) {
+        this.pushEvent(room, {
+          kind: 'crescentSlash',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x + fx * 0.85,
+          y: actor.y + 1.05,
+          z: actor.z + fz * 0.85,
+          dirX: fx,
+          dirZ: fz,
+          radius: 2.0,
+          colorHex: 0x38bdf8,
+          abilitySlot: 0,
+          comboStep: 3,
+        });
         room.projectiles.push({
           id: makeId('proj'),
           ownerId: actor.playerId,
@@ -3518,6 +3881,8 @@ export class GameRoomEngine {
 
     if (actor.fighterId === 'damen' && slot === 4) {
       const volleyHitCounts = new Map<string, number>();
+      const inDamenDomain =
+        room.activeDomain?.ownerId === actor.playerId && room.activeDomain.fighterId === 'damen';
       for (const spread of [-0.36, -0.24, -0.12, 0, 0.12, 0.24, 0.36]) {
         const ang = actor.rotY + spread;
         room.projectiles.push({
@@ -3535,6 +3900,7 @@ export class GameRoomEngine {
           originX: actor.x,
           originY: actor.y + 1.15,
           originZ: actor.z,
+          isHoming: inDamenDomain,
           age: 0,
           maxAge: 0.56,
           maxRange: 14.5,
@@ -3708,7 +4074,7 @@ export class GameRoomEngine {
       return;
     }
 
-    // JM Solar Dragon Beam Ultimate (works from Sky Flight downward onto floor targets too!)
+    // JM Solar Dragon Beam Ultimate (V-trench + fast-twisting wind/ki ribbons!)
     if (actor.fighterId === 'jm' && slot === 4) {
       this.pushEvent(room, {
         kind: 'beam',
@@ -3723,6 +4089,19 @@ export class GameRoomEngine {
         hitStopMs: 95,
         abilitySlot: 4,
         counterFlow: actor.counterFlowActive,
+      });
+      this.pushEvent(room, {
+        kind: 'trenchPulse',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 1.1,
+        y: actor.y + 0.3,
+        z: actor.z + fz * 1.1,
+        dirX: fx,
+        dirZ: fz,
+        radius: ab.range,
+        colorHex: 0xfacc15,
+        abilitySlot: 4,
       });
       const maxBeamVert = actor.isFlying ? 8.5 : 2.6;
       for (const target of room.actors) {
@@ -3776,7 +4155,7 @@ export class GameRoomEngine {
       this.spawnZone(room, actor, 'galeSnare', actor.x, actor.y, actor.z, 2.8, 3.2, spec.hex);
     }
 
-    // JM Solar Sanctuary Ward Hold-Drag vs Tap Slam (projects to floor when flying!)
+    // JM Base Skill 2: Hold-Drag Solar Sanctuary Ward vs Stage 1 Rising Dragon Kick (launch upward!)
     if (actor.fighterId === 'jm' && slot === 3) {
       if (actor.pendingHoldVariant && actor.pendingAimX !== null && actor.pendingAimZ !== null) {
         const cx = actor.pendingAimX;
@@ -3806,8 +4185,64 @@ export class GameRoomEngine {
         actor.landedCurrentAction = true;
         return;
       }
-      const floorY = actor.isFlying ? getObstacleSupportY(room.mapId, actor.x, 0, actor.z, 0.42, room.obstacles) : actor.y;
-      this.spawnZone(room, actor, 'solarSanctuary', actor.x, floorY, actor.z, 2.6, 3.1, spec.hex);
+      // Stage 1: Rising Dragon Kick — crescent wind-ki ribbons sweep upward & launch hit foes high!
+      this.pushEvent(room, {
+        kind: 'crescentSlash',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 0.9,
+        y: actor.y + 1.15,
+        z: actor.z + fz * 0.9,
+        dirX: fx,
+        dirZ: fz,
+        radius: 2.8,
+        colorHex: 0xfacc15,
+        abilitySlot: 3,
+        comboStep: 2,
+        callout: 'RISING DRAGON KICK!',
+      });
+      this.pushEvent(room, {
+        kind: 'shockwave',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x,
+        y: actor.y + 0.3,
+        z: actor.z,
+        radius: 3.8,
+        colorHex: 0x38bdf8,
+        abilitySlot: 3,
+      });
+      for (const target of room.actors) {
+        if (target.playerId === actor.playerId || target.isKO) continue;
+        const d = Math.hypot(target.x - actor.x, target.z - actor.z);
+        if (d <= 4.3 && Math.abs(target.y - actor.y) <= 2.8) {
+          const calc = this.computeDynamicDamage(actor, target, 14, 3);
+          const hit = this.applyHit(
+            room,
+            actor,
+            target,
+            calc.dmg,
+            20 + calc.staggerBonus,
+            1.2,
+            fx,
+            fz,
+            spec.hex,
+            true,
+            false,
+            false,
+            calc.isCrit,
+            calc.isBackstab
+          );
+          if (hit) {
+            target.yVel = 10.6;
+            target.grounded = false;
+            target.vx = fx * 1.4;
+            target.vz = fz * 1.4;
+            actor.landedCurrentAction = true;
+          }
+        }
+      }
+      return;
     }
 
     // PRIME Stage 1 Magma Uppercut vs Stage 2 / Hold-Drag Crater Slam + Molten Fissure
@@ -3941,7 +4376,39 @@ export class GameRoomEngine {
         frenzyInside: actor.frenzyInside,
         counterFlow: actor.counterFlowActive,
       });
+    } else if (slot === 0 && actor.fighterId === 'jm' && !actor.isFlying && actor.comboStep <= 3) {
+      this.pushEvent(room, {
+        kind: 'crescentSlash',
+        attackerId: actor.playerId,
+        fighterId: 'jm',
+        x: actor.x + fx * 0.75,
+        y: actor.y + 1.05,
+        z: actor.z + fz * 0.75,
+        dirX: fx,
+        dirZ: fz,
+        radius: 1.85,
+        colorHex: actor.comboStep === 2 ? 0x38bdf8 : 0xfacc15,
+        abilitySlot: 0,
+        comboStep: actor.comboStep as 1 | 2 | 3,
+      });
     } else if (slot === 0 && actor.comboStep === 4) {
+      if (actor.fighterId === 'jm') {
+        this.pushEvent(room, {
+          kind: 'craterSlam',
+          attackerId: actor.playerId,
+          fighterId: 'jm',
+          x: actor.x + fx * 1.0,
+          y: actor.y + 0.3,
+          z: actor.z + fz * 1.0,
+          dirX: fx,
+          dirZ: fz,
+          radius: 3.4,
+          colorHex: spec.hex,
+          abilitySlot: 0,
+          comboStep: 4,
+          m1Variant: 'heavy',
+        });
+      }
       this.pushEvent(room, {
         kind: 'shockwave',
         attackerId: actor.playerId,
@@ -4022,6 +4489,9 @@ export class GameRoomEngine {
     isBackstab = false
   ): boolean {
     if (target.isKO || target.actionState === 'clash') return false;
+    if (attacker.playerId !== target.playerId && areActorsAllied(attacker, target, room.gameMode)) {
+      return false;
+    }
 
     // Perfect Evade check: dodging through an incoming hit with active dash i-frames!
     if (target.iframeTimer > 0) {
@@ -4060,8 +4530,21 @@ export class GameRoomEngine {
         target.stamina = clamp(target.stamina + 30, 0, target.maxStamina);
         target.iframeTimer = Math.max(target.iframeTimer, 0.36);
 
+        let parryOriginX: number | undefined;
+        let parryOriginY: number | undefined;
+        let parryOriginZ: number | undefined;
         if (target.fighterId === 'jm') {
           target.counterFlowActive = true;
+          target.cooldowns[2] = 0; // Reset Flash Step cooldown immediately on Dragon Counter!
+          parryOriginX = target.x;
+          parryOriginY = target.y + 1.0;
+          parryOriginZ = target.z;
+          const blink = computeParryBlinkBehind(attacker.x, attacker.z, attacker.rotY, 1.45);
+          const safeBlink = resolveObstacleCollisions(room.mapId, blink.x, target.y, blink.z, 0.48, room.obstacles);
+          target.x = safeBlink.x;
+          target.z = safeBlink.z;
+          target.y = attacker.y;
+          target.rotY = Math.atan2(attacker.x - target.x, attacker.z - target.z);
         }
 
         this.pushEvent(room, {
@@ -4069,32 +4552,44 @@ export class GameRoomEngine {
           attackerId: attacker.playerId,
           targetId: target.playerId,
           fighterId: target.fighterId,
-          x: (attacker.x + target.x) * 0.5,
+          x: target.fighterId === 'jm' ? target.x : (attacker.x + target.x) * 0.5,
           y: target.y + 1.25,
-          z: (attacker.z + target.z) * 0.5,
+          z: target.fighterId === 'jm' ? target.z : (attacker.z + target.z) * 0.5,
+          originX: parryOriginX,
+          originY: parryOriginY,
+          originZ: parryOriginZ,
           dirX: -dirX,
           dirZ: -dirZ,
           colorHex: FIGHTER_BY_ID[target.fighterId].hex,
-          hitStopMs: 85,
+          hitStopMs: 90,
+          isCounter: target.fighterId === 'jm',
           rpsOutcome: 'parry_beats_strike',
           counterFlow: target.fighterId === 'jm',
-          callout: target.fighterId === 'jm' ? 'COUNTER-FLOW PARRY!' : 'PERFECT PARRY!',
+          callout: target.fighterId === 'jm' ? 'DRAGON COUNTER BLINK!' : 'PERFECT PARRY!',
         });
 
-        if (Math.hypot(attacker.x - target.x, attacker.z - target.z) < 5.2) {
-          attacker.actionState = 'stagger';
-          attacker.actionTimer = 0.9;
-          attacker.actionDuration = 0.9;
-          attacker.vx = -dirX * 9.0;
-          attacker.vz = -dirZ * 9.0;
-          this.addStagger(room, target, attacker, 36);
+        if (Math.hypot(attacker.x - target.x, attacker.z - target.z) < 6.0) {
+          if (canApplyStun(attacker.stunImmunityTimer)) {
+            const parryStun = resolveCappedStunDuration(0.75, false);
+            attacker.actionState = 'stagger';
+            attacker.actionTimer = parryStun;
+            attacker.actionDuration = parryStun;
+            attacker.stunnedTimer = Math.max(attacker.stunnedTimer, parryStun);
+          }
           if (target.fighterId === 'jm') {
+            attacker.vx = 0;
+            attacker.vz = 0;
+            this.addStagger(room, target, attacker, 36);
             attacker.hp = Math.max(0, attacker.hp - 12);
             attacker.damagePhase = getDamagePhase(attacker.hp, attacker.maxHp, attacker.isKO);
             target.damageDealt += 12;
             if (attacker.hp <= 0) {
               this.eliminateActor(room, target, attacker, 'parry');
             }
+          } else {
+            attacker.vx = -dirX * 9.0;
+            attacker.vz = -dirZ * 9.0;
+            this.addStagger(room, target, attacker, 36);
           }
         }
         return false;
@@ -4104,9 +4599,12 @@ export class GameRoomEngine {
       if ((isUltimate || isHeavy) && target.stamina < 16) {
         target.shieldActive = false;
         target.blockHeld = false;
-        target.actionState = 'stagger';
-        target.actionTimer = 0.85;
-        target.actionDuration = 0.85;
+        if (canApplyStun(target.stunImmunityTimer)) {
+          const breakStun = resolveCappedStunDuration(0.75, isUltimate);
+          target.actionState = 'stagger';
+          target.actionTimer = breakStun;
+          target.actionDuration = breakStun;
+        }
         this.pushEvent(room, {
           kind: 'parry',
           attackerId: attacker.playerId,
@@ -4166,6 +4664,22 @@ export class GameRoomEngine {
     attackerAddDamage(attacker, finalDmg);
     attacker.rushFatigue = 0;
 
+    // Domain Expansion gauge charging on damage dealt & taken
+    if (!room.activeDomain || room.activeDomain.ownerId !== attacker.playerId) {
+      attacker.domainGauge = addDomainCharge(
+        attacker.domainGauge ?? 0,
+        finalDmg * 0.6,
+        getDomainChargeMultiplier(room, attacker)
+      );
+    }
+    if (!target.isDummy) {
+      target.domainGauge = addDomainCharge(
+        target.domainGauge ?? 0,
+        finalDmg * 0.45,
+        getDomainChargeMultiplier(room, target)
+      );
+    }
+
     // Update Attacker Combo (resets if no damage dealt for 2.0 seconds) & Passives
     if (room.matchTime - attacker.lastHitAt <= 2.0) {
       attacker.comboCount += 1;
@@ -4213,14 +4727,15 @@ export class GameRoomEngine {
     }
 
     const wasCounter = target.actionState === 'whiff';
-    // Super Armor prevents Prime from being interrupted by basic M1 / light hits!
+    // Super Armor + post-stun grace immunity prevents infinite stunlocks
     const canStaggerTarget =
-      !target.superArmor || isUltimate || finalDmg >= 24;
+      (!target.superArmor || isUltimate || finalDmg >= 24) &&
+      canApplyStun(target.stunImmunityTimer);
     if (canStaggerTarget && (isHeavy || finalDmg >= 16 || wasCounter)) {
-      const dur = isHeavy ? 0.48 : 0.32;
+      const dur = resolveCappedStunDuration(isHeavy ? 0.52 : 0.35, isUltimate);
       target.actionState = 'stagger';
-      target.actionTimer = Math.max(target.actionTimer, dur);
-      target.actionDuration = Math.max(target.actionDuration, dur);
+      target.actionTimer = Math.min(isUltimate ? 1.1 : 0.75, Math.max(target.actionTimer, dur));
+      target.actionDuration = Math.min(isUltimate ? 1.1 : 0.75, Math.max(target.actionDuration, dur));
       target.shieldActive = false;
       target.parryWindow = false;
     }
@@ -4285,8 +4800,18 @@ export class GameRoomEngine {
     target.shieldActive = false;
     target.parryWindow = false;
     target.blockHeld = false;
+    target.deaths = (target.deaths ?? 0) + 1;
     if (attacker && attacker.playerId !== target.playerId) {
       attacker.kills += 1;
+    }
+    if (room.gameMode === 'squad_clash') {
+      if (attacker && (attacker.team === 'alpha' || attacker.team === 'beta') && attacker.team !== target.team) {
+        room.teamScores[attacker.team] += 1;
+      } else if (target.team === 'alpha') {
+        room.teamScores.beta += 1;
+      } else if (target.team === 'beta') {
+        room.teamScores.alpha += 1;
+      }
     }
 
     const causeText =
@@ -4426,7 +4951,7 @@ export class GameRoomEngine {
     }
 
     if (bot.isKO) {
-      if (bot.koTime !== null && room.matchTime - bot.koTime >= 2.8) {
+      if ((room.isTrainingMode || room.isSoloPractice) && bot.koTime !== null && room.matchTime - bot.koTime >= 2.8) {
         bot.isKO = false;
         bot.koTime = null;
         bot.hp = bot.maxHp;
@@ -4599,6 +5124,25 @@ export class GameRoomEngine {
         bot.moveZ = (dx / Math.max(1, dist)) * side;
       }
       return;
+    }
+
+    // Bot Domain Expansion activation at 100% gauge
+    if ((bot.domainGauge ?? 0) >= 100 && !bot.isStunned && bot.silencedTimer <= 0 && Math.random() < dt * 0.45) {
+      if (handleDomainActivate(room, bot, this.getAwakeningHelpers())) {
+        return;
+      }
+    }
+
+    // In King of the Hill, prioritize moving toward the active capture zone when safe
+    if (room.gameMode === 'koth' && room.kothZone) {
+      const kdx = room.kothZone.x - bot.x;
+      const kdz = room.kothZone.z - bot.z;
+      const kd = Math.hypot(kdx, kdz);
+      if (kd > room.kothZone.radius * 0.8 && dist > 4.2) {
+        bot.moveX = (kdx / kd) * 0.85;
+        bot.moveZ = (kdz / kd) * 0.85;
+        return;
+      }
     }
 
     if (dist > 3.4) {
@@ -4808,9 +5352,11 @@ export class GameRoomEngine {
         }
       }
 
-      // 1-Minute Sudden Death Shrinking Storm Zone (disabled in Training Area & removed once Awakening Orbs spawn)
+      // 1-Minute Sudden Death Shrinking Storm Zone (always active in sudden_death; disabled in Training Area & removed once Awakening Orbs spawn otherwise)
       room.stormMaxRadius = arenaRadius;
-      if (room.awakeningPhase !== 'PRE_AWAKENING') {
+      if (room.gameMode === 'sudden_death') {
+        room.stormActive = true;
+      } else if (room.awakeningPhase !== 'PRE_AWAKENING') {
         if (room.stormActive) {
           room.stormActive = false;
           room.stormRadius = arenaRadius;
@@ -4882,6 +5428,7 @@ export class GameRoomEngine {
         actor.perfectEvadeTimer = Math.max(0, actor.perfectEvadeTimer - dt);
         actor.speedBoostTimer = Math.max(0, actor.speedBoostTimer - dt);
         actor.slowTimer = Math.max(0, actor.slowTimer - dt);
+        actor.stunImmunityTimer = Math.max(0, (actor.stunImmunityTimer ?? 0) - dt);
 
         // Standalone 1.5s Dash Cooldown sync
         actor.dashCharges = actor.dashCooldown <= 0.01 ? 1 : 0;
@@ -4899,7 +5446,7 @@ export class GameRoomEngine {
             }
           }
           if (actor.isFlying) {
-            if (!(zeroCdMode && !actor.isBot)) {
+            if (!(zeroCdMode && !actor.isBot) && actor.channelKind !== 'jm_air_barrage') {
               actor.flightRemaining = Math.max(0, actor.flightRemaining - dt);
             }
             if (
@@ -4949,7 +5496,7 @@ export class GameRoomEngine {
             if (
               actor.flightRemaining <= 0 ||
               actor.isKO ||
-              actor.channelKind !== null ||
+              (actor.channelKind !== null && !shouldKeepFlightDuringChannel(actor.channelKind)) ||
               actor.actionState === 'stagger' ||
               actor.actionState === 'clash' ||
               actor.actionState === 'headlock'
@@ -5182,7 +5729,7 @@ export class GameRoomEngine {
             }
           }
 
-          if (actor.actionState === 'grab' && !actor.windupTriggered && elapsedInAction >= 0.11) {
+          if (actor.actionState === 'grab' && !actor.windupTriggered && elapsedInAction >= 0.055) {
             actor.windupTriggered = true;
             this.executeGrabImpact(room, actor);
           } else if (actor.abilitySlot !== null && !actor.windupTriggered) {
@@ -5196,9 +5743,16 @@ export class GameRoomEngine {
               : slotVal === 5
               ? JM_SECRET_ABILITY
               : FIGHTER_BY_ID[actor.fighterId].abilities[slotVal === 6 ? 4 : slotVal];
+            const jmSanctuaryWindup =
+              actor.fighterId === 'jm' &&
+              slotVal === 6 &&
+              room.activeDomain?.ownerId === actor.playerId &&
+              room.activeDomain.fighterId === 'jm';
             const effectiveWindup =
               actor.abilitySlot === 0 && actor.fighterId === 'prime' && actor.comboStep === 4
                 ? ab.windup + 0.08
+                : jmSanctuaryWindup
+                ? Math.max(0.18, ab.windup * 0.5)
                 : ab.windup;
             if (elapsedInAction >= effectiveWindup && actor.actionState !== 'guard') {
               actor.windupTriggered = true;
@@ -5226,9 +5780,10 @@ export class GameRoomEngine {
             actor.abilitySlot = null;
             actor.pendingComboLink = false;
 
-            if (prevState === 'stagger' && actor.isStunned) {
+            if (prevState === 'stagger') {
               actor.isStunned = false;
               actor.stagger = 0;
+              actor.stunImmunityTimer = Math.max(actor.stunImmunityTimer ?? 0, STUN_RECOVERY_IMMUNITY_SEC);
             }
 
             if (missedBigMove) {
@@ -5240,7 +5795,7 @@ export class GameRoomEngine {
                   : null;
               const whiffDur =
                 prevState === 'grab'
-                  ? 0.42
+                  ? 0.21
                   : prevAwAb
                   ? prevAwAb.whiffRecovery
                   : prevSlot === 5
@@ -5278,6 +5833,9 @@ export class GameRoomEngine {
           actor.actionState === 'stagger'
         ) {
           // Defensive unstuck guard: never leave an actor locked with timer <= 0
+          if (actor.actionState === 'stagger') {
+            actor.stunImmunityTimer = Math.max(actor.stunImmunityTimer ?? 0, STUN_RECOVERY_IMMUNITY_SEC);
+          }
           actor.abilitySlot = null;
           actor.superArmor = false;
           actor.isStunned = false;
@@ -5286,7 +5844,9 @@ export class GameRoomEngine {
 
         // Locomotion (Overdrive, Tailwind, Quick-Draw Step, Khen Lunge & Free-Roam Ult Channels!)
         const isFreeRoamChannel =
-          actor.channelKind === 'prime_meteor' || actor.channelKind === 'marjohn_typhoon';
+          actor.channelKind === 'prime_meteor' ||
+          actor.channelKind === 'marjohn_typhoon' ||
+          actor.channelKind === 'jm_air_barrage';
         const canMove =
           isFreeRoamChannel ||
           ((actor.channelKind === null) &&
@@ -5299,12 +5859,14 @@ export class GameRoomEngine {
           resolveActorBaseMoveSpeed(FIGHTER_BY_ID[actor.fighterId].moveSpeed, actor.awakened) *
           (actor.isOverdrive ? 1.18 : 1.0) *
           (actor.speedBoostTimer > 0 ? 1.24 : 1.0) *
-          (actor.slowTimer > 0 ? 0.62 : 1.0) *
+          (actor.slowTimer > 0 ? 0.55 : 1.0) *
           (actor.fighterId === 'marjohn' ? 1 + actor.passiveStacks * 0.04 : 1.0);
         const speed =
           baseMoveSpeed *
           (actor.channelKind === 'marjohn_typhoon'
-            ? 0.35
+            ? 0.85
+            : actor.channelKind === 'jm_air_barrage'
+            ? 0.55
             : actor.channelKind === 'prime_meteor'
             ? 1.0
             : actor.actionState === 'whiff'
@@ -5366,7 +5928,18 @@ export class GameRoomEngine {
         actor.x = stepped.x;
         actor.z = stepped.z;
 
-        const isSkyCharging = actor.actionState === 'ultimate' && actor.abilitySlot === 5 && !actor.windupTriggered;
+        const isSkyCharging =
+          (actor.actionState === 'ultimate' && actor.abilitySlot === 5 && !actor.windupTriggered) ||
+          actor.channelKind === 'jm_sky_uppercut' ||
+          actor.channelKind === 'jm_sky_peak' ||
+          actor.channelKind === 'jm_sky_finisher' ||
+          room.actors.some(
+            (other) =>
+              (other.channelKind === 'jm_sky_uppercut' ||
+                other.channelKind === 'jm_sky_peak' ||
+                other.channelKind === 'jm_sky_finisher') &&
+              other.skyComboTargetId === actor.playerId
+          );
         if (!isSkyCharging) {
           const supportY = getObstacleSupportY(room.mapId, actor.x, actor.y, actor.z, 0.42, room.obstacles);
           if (actor.channelKind === 'prime_meteor' || actor.channelKind === 'marjohn_typhoon') {
@@ -5454,11 +6027,12 @@ export class GameRoomEngine {
         p.age += dt;
         const owner = room.actors.find((a) => a.playerId === p.ownerId);
 
-        if (p.isHoming && p.kind === 'tornado') {
+        if (p.isHoming && (p.kind === 'tornado' || p.kind === 'bullet' || p.kind === 'magnum')) {
           let bestTarget: InternalActor | null = null;
           let bestDist = 24.0;
           for (const cand of room.actors) {
             if (cand.playerId === p.ownerId || cand.isKO) continue;
+            if (owner && areActorsAllied(owner, cand, room.gameMode)) continue;
             const d = Math.hypot(cand.x - p.x, cand.z - p.z);
             if (d < bestDist) {
               bestDist = d;
@@ -5466,6 +6040,10 @@ export class GameRoomEngine {
             }
           }
           if (bestTarget) {
+            const steerSpeed =
+              p.kind === 'tornado' ? AWAKENING_CONFIG.MARJOHN_FLANK_TORNADO_SPEED : 29.0;
+            const turnRate =
+              p.kind === 'tornado' ? AWAKENING_CONFIG.MARJOHN_FLANK_TORNADO_TURN_RATE : 9.0;
             const steered = stepHomingProjectileVelocity(
               p.vx,
               p.vz,
@@ -5473,8 +6051,8 @@ export class GameRoomEngine {
               p.z,
               bestTarget.x,
               bestTarget.z,
-              AWAKENING_CONFIG.MARJOHN_FLANK_TORNADO_SPEED,
-              AWAKENING_CONFIG.MARJOHN_FLANK_TORNADO_TURN_RATE,
+              steerSpeed,
+              turnRate,
               dt
             );
             p.vx = steered.vx;
@@ -5671,6 +6249,9 @@ export class GameRoomEngine {
               if (landed) {
                 owner.landedCurrentAction = true;
                 if (p.kind === 'bullet' || p.kind === 'magnum' || p.kind === 'solarRailgun') {
+                  if (p.kind === 'bullet' || p.kind === 'magnum') {
+                    registerDamenDomainBulletHit(room, owner, this.getAwakeningHelpers());
+                  }
                   if (isPrimaryVolleyHit) {
                     owner.mana = clamp(owner.mana + (p.kind === 'magnum' ? 9 : 7), 0, owner.maxMana);
                     if (owner.fighterId === 'damen') {
@@ -5949,9 +6530,16 @@ export class GameRoomEngine {
       }
       room.zones = nextZones;
 
+      tickDomainAndModes(room, dt, this.getAwakeningHelpers());
+      if ((room.phase as string) === 'victory') {
+        this.broadcastRoomState(room);
+        this.broadcastSnapshot(room, true, now);
+        continue;
+      }
+
       if (room.isTrainingMode) {
         // Infinite training until player clicks Leave
-      } else if (room.isSoloPractice) {
+      } else if (room.isSoloPractice && room.gameMode === 'classic') {
         const humanActor = room.actors.find((a) => !a.isBot);
         if (humanActor && humanActor.isKO) {
           room.victoryDelayTimer += dt;
@@ -5973,7 +6561,7 @@ export class GameRoomEngine {
             continue;
           }
         }
-      } else {
+      } else if (room.gameMode === 'classic' || room.gameMode === 'sudden_death') {
         const alive = room.actors.filter((a) => !a.isKO);
         if (alive.length <= 1) {
           room.victoryDelayTimer += dt;
@@ -6048,8 +6636,34 @@ export class GameRoomEngine {
     return {
       serverTime: Date.now(),
       matchTime: Number(room.matchTime.toFixed(2)),
+      gameMode: room.gameMode,
       initialActorCount: room.initialActorCount,
       lastInputSeq: { ...room.lastInputSeq },
+      activeDomain: room.activeDomain
+        ? {
+            ...room.activeDomain,
+            centerX: Number(room.activeDomain.centerX.toFixed(2)),
+            centerZ: Number(room.activeDomain.centerZ.toFixed(2)),
+            remaining: Number(Math.max(0, room.activeDomain.remaining).toFixed(2)),
+            sureHitTimer: Number(Math.max(0, room.activeDomain.sureHitTimer).toFixed(2)),
+          }
+        : null,
+      activeDomainClash: room.activeDomainClash
+        ? {
+            ...room.activeDomainClash,
+            remaining: Number(Math.max(0, room.activeDomainClash.remaining).toFixed(2)),
+          }
+        : null,
+      kothZone: room.kothZone
+        ? {
+            ...room.kothZone,
+            shiftRemaining: Number(Math.max(0, room.kothZone.shiftRemaining).toFixed(1)),
+            scores: { ...room.kothZone.scores },
+          }
+        : null,
+      teamScores: { ...room.teamScores },
+      modeTimer: Number(Math.max(0, room.modeTimer).toFixed(1)),
+      raidBossId: room.raidBossId,
       battleEvent: room.battleEvent
         ? {
             id: room.battleEvent.id,
@@ -6132,6 +6746,8 @@ export class GameRoomEngine {
         skinId: a.skinId,
         isBot: a.isBot,
         isDummy: a.isDummy,
+        team: a.team,
+        isRaidBoss: a.isRaidBoss,
         x: Number(a.x.toFixed(3)),
         y: Number(a.y.toFixed(3)),
         z: Number(a.z.toFixed(3)),
@@ -6148,6 +6764,10 @@ export class GameRoomEngine {
         maxStamina: a.maxStamina,
         stagger: Math.round(a.stagger),
         isStunned: a.isStunned,
+        stunImmunityTimer: Number((a.stunImmunityTimer ?? 0).toFixed(2)),
+        domainGauge: Number((a.domainGauge ?? 0).toFixed(1)),
+        domainJackpotActive: Boolean(a.domainJackpotActive),
+        domainJackpotHits: a.domainJackpotHits ?? 0,
         isOverdrive: a.isOverdrive,
         frenzyInside: a.frenzyInside,
         passiveStacks: a.passiveStacks,
@@ -6203,6 +6823,10 @@ export class GameRoomEngine {
         channelDuration: Number(a.channelDuration.toFixed(2)),
         channelTargetX: Number(a.channelTargetX.toFixed(2)),
         channelTargetZ: Number(a.channelTargetZ.toFixed(2)),
+        skyComboPrompt: Boolean(a.skyComboPrompt),
+        skyComboStep: a.skyComboStep ?? 0,
+        skyComboMashes: a.skyComboMashes ?? 0,
+        skyComboTargetId: a.skyComboTargetId ?? null,
         isKO: a.isKO,
         koTime: a.koTime !== null ? Number(a.koTime.toFixed(2)) : null,
         koStyle: a.koStyle,
@@ -6210,6 +6834,7 @@ export class GameRoomEngine {
         koByFighterId: a.koByFighterId,
         wins: a.wins,
         kills: a.kills,
+        deaths: a.deaths ?? 0,
         parryCount: a.parryCount,
         damageDealt: Math.round(a.damageDealt),
         ...(a.isDummy && a.dummyDpsTracker

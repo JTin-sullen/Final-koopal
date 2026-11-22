@@ -22,6 +22,9 @@ import {
   FIGHTER_BY_ID,
   FIGHTERS,
   FighterId,
+  GAME_MODES,
+  GAME_MODE_BY_ID,
+  GameModeId,
   MAPS,
   MapId,
   RoomChatMessage,
@@ -66,6 +69,7 @@ interface TekkenPickScreenProps {
   onSelectFighter: (fighterId: FighterId) => void;
   onSelectSkin: (skinId: SkinId) => void;
   onSelectMap: (mapId: MapId) => void;
+  onSelectMode?: (gameMode: GameModeId) => void;
   onToggleReady: (ready: boolean) => void;
   onStartNow: () => void;
   onOpenShop: (initialFighterId?: FighterId, initialSkinId?: SkinId) => void;
@@ -91,6 +95,7 @@ export const TekkenPickScreen: React.FC<TekkenPickScreenProps> = ({
   onSelectFighter,
   onSelectSkin,
   onSelectMap,
+  onSelectMode,
   onToggleReady,
   onStartNow,
   onOpenShop,
@@ -234,9 +239,9 @@ export const TekkenPickScreen: React.FC<TekkenPickScreenProps> = ({
             <span className="text-[11px] sm:text-xs text-slate-600 font-mono-num">
               {room.isTrainingMode
                 ? 'Free Practice · Dummy & Zero CD Toggles'
-                : room.isSoloPractice
-                ? '1P vs Smart Bot · Loss Exits'
-                : `${room.players.length}/5 Joined · First to 3 Wins`}
+                : `${GAME_MODE_BY_ID[room.gameMode]?.name ?? 'Classic Arena'} · ${
+                    room.isSoloPractice ? 'Vs. Bot' : `${room.players.length}/5 Joined`
+                  }`}
             </span>
             <RoomChatBox
               messages={chatMessages}
@@ -280,17 +285,30 @@ export const TekkenPickScreen: React.FC<TekkenPickScreenProps> = ({
                     : 'bg-slate-100/80 border-slate-200/80 opacity-70'
                 }`}
               >
-                <div className="flex items-center justify-between text-[10px]">
+                <div className="flex items-center justify-between text-[10px] gap-1">
                   <span className="font-mono-num font-bold text-slate-500">
                     P{slotIdx + 1} {isSelf ? '(You)' : ''}
                   </span>
-                  {p ? (
-                    <span className={`font-semibold ${p.ready ? 'text-emerald-700' : 'text-amber-700'}`}>
-                      {p.ready ? 'LOCKED' : 'SELECTING'}
-                    </span>
-                  ) : (
-                    <span className="text-slate-400">OPEN</span>
-                  )}
+                  <div className="flex items-center gap-1">
+                    {p?.team && (room.gameMode === 'squad_clash' || room.gameMode === 'raid_boss') && (
+                      <span
+                        className={`px-1 rounded text-[8px] font-display font-bold uppercase ${
+                          p.team === 'boss' || p.team === 'beta'
+                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                            : 'bg-sky-100 text-sky-800 border border-sky-300'
+                        }`}
+                      >
+                        {p.team}
+                      </span>
+                    )}
+                    {p ? (
+                      <span className={`font-semibold ${p.ready ? 'text-emerald-700' : 'text-amber-700'}`}>
+                        {p.ready ? 'LOCKED' : 'SELECTING'}
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">OPEN</span>
+                    )}
+                  </div>
                 </div>
                 {p && fSpec ? (
                   <div className="mt-0.5 flex items-center justify-between gap-1">
@@ -306,6 +324,45 @@ export const TekkenPickScreen: React.FC<TekkenPickScreenProps> = ({
             );
           })}
         </div>
+
+        {!room.isTrainingMode && onSelectMode && (
+          <div className="bg-white border border-slate-200 rounded-xl px-3 py-1.5 shadow-xs flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <Swords className="w-3.5 h-3.5 text-amber-600" />
+              <span className="text-[10px] font-display font-bold uppercase tracking-wider text-slate-700">
+                Mode:
+              </span>
+              <span className="text-[10px] text-slate-500 hidden sm:inline">
+                {GAME_MODE_BY_ID[room.gameMode]?.description}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 flex-wrap">
+              {GAME_MODES.map((gm) => {
+                const active = room.gameMode === gm.id;
+                return (
+                  <button
+                    key={gm.id}
+                    type="button"
+                    data-testid={`pick-mode-${gm.id}`}
+                    disabled={!isHost}
+                    onClick={() => {
+                      soundEngine.unlock();
+                      soundEngine.play('uiSelect');
+                      onSelectMode(gm.id);
+                    }}
+                    className={`px-2 py-0.5 rounded-lg border text-[10px] font-display font-bold uppercase transition ${
+                      active
+                        ? 'bg-slate-900 text-amber-300 border-slate-950'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    } ${isHost ? 'cursor-pointer' : 'cursor-default opacity-80'}`}
+                  >
+                    {gm.shortLabel}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {errorMessage && (
           <div className="rounded-xl bg-rose-50 border border-rose-300 px-3.5 py-2 text-xs text-rose-800 font-medium">

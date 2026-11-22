@@ -131,6 +131,11 @@ export interface FighterRig {
   overheadCanvas: HTMLCanvasElement;
   overheadCtx: CanvasRenderingContext2D;
   overheadTex: THREE.CanvasTexture;
+  dummyBillboardSprite: THREE.Sprite;
+  dummyBillboardCanvas: HTMLCanvasElement;
+  dummyBillboardCtx: CanvasRenderingContext2D;
+  dummyBillboardTex: THREE.CanvasTexture;
+  lastDummyBoardKey: string;
   lastBarKey: string;
   smoothedPose: FighterPose | null;
   walkPhase: number;
@@ -1302,10 +1307,40 @@ export function createArticulatedFighter(
       opacity: 0,
       wireframe: true,
       blending: THREE.AdditiveBlending,
+      depthWrite: false,
     })
   );
   goldenShield.position.y = 1.05;
   goldenShield.visible = false;
+  if (id === 'jm') {
+    const outerCounterRing = new THREE.Mesh(
+      new THREE.RingGeometry(1.12, 1.38, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.78,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    outerCounterRing.rotation.x = -Math.PI * 0.5;
+    outerCounterRing.position.y = -0.76;
+    const innerCounterRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.74, 0.94, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0xfef08a,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    innerCounterRing.rotation.x = -Math.PI * 0.5;
+    innerCounterRing.position.y = -0.72;
+    goldenShield.add(outerCounterRing, innerCounterRing);
+  }
   leanPivot.add(goldenShield);
 
   let shieldShards: Array<{ mesh: THREE.Mesh; vx: number; vy: number; vz: number }> | null = null;
@@ -1694,6 +1729,7 @@ export function createArticulatedFighter(
         transparent: true,
         opacity: 0.96,
         blending: THREE.AdditiveBlending,
+        depthWrite: false,
       })
     );
     const coreRing = new THREE.Mesh(
@@ -1703,12 +1739,45 @@ export function createArticulatedFighter(
         transparent: true,
         opacity: 0.9,
         blending: THREE.AdditiveBlending,
+        depthWrite: false,
       })
     );
     dragonCore.add(coreGem, coreRing);
     torso.add(dragonCore);
     awakenedParts.push(dragonCore);
     awakenedOrbiters.push(dragonCore);
+
+    // Celestial Dragon double-helix orbiting ki-ribbon rings
+    const dragonKiOrbit = new THREE.Group();
+    dragonKiOrbit.position.set(0, 1.0, 0);
+    dragonKiOrbit.visible = false;
+    const kiRibbonA = new THREE.Mesh(
+      new THREE.TorusGeometry(0.86, 0.032, 6, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xfef08a,
+        transparent: true,
+        opacity: 0.88,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    kiRibbonA.rotation.x = Math.PI * 0.38;
+    const kiRibbonB = new THREE.Mesh(
+      new THREE.TorusGeometry(0.96, 0.028, 6, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.84,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    kiRibbonB.rotation.x = -Math.PI * 0.38;
+    kiRibbonB.rotation.y = Math.PI * 0.25;
+    dragonKiOrbit.add(kiRibbonA, kiRibbonB);
+    leanPivot.add(dragonKiOrbit);
+    awakenedParts.push(dragonKiOrbit);
+    awakenedOrbiters.push(dragonKiOrbit);
   }
 
   const silencedRing = new THREE.Mesh(
@@ -1759,6 +1828,26 @@ export function createArticulatedFighter(
   barSprite.position.set(0, 2.38, 0);
   barSprite.scale.set(1.92, 0.52, 1);
   root.add(barSprite);
+
+  // Oversized high-contrast Training Dummy DPS & Total Damage Billboard
+  const dummyCanvas = document.createElement('canvas');
+  dummyCanvas.width = 512;
+  dummyCanvas.height = 176;
+  const dummyCtx = dummyCanvas.getContext('2d')!;
+  const dummyTex = new THREE.CanvasTexture(dummyCanvas);
+  dummyTex.colorSpace = THREE.SRGBColorSpace;
+  const dummySprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: dummyTex,
+      transparent: true,
+      depthTest: false,
+    })
+  );
+  dummySprite.position.set(0, 3.22, 0);
+  dummySprite.scale.set(3.65, 1.26, 1);
+  dummySprite.visible = false;
+  dummySprite.renderOrder = 26;
+  root.add(dummySprite);
 
   return {
     id,
@@ -1816,6 +1905,11 @@ export function createArticulatedFighter(
     overheadCanvas: barCanvas,
     overheadCtx: barCtx,
     overheadTex: barTex,
+    dummyBillboardSprite: dummySprite,
+    dummyBillboardCanvas: dummyCanvas,
+    dummyBillboardCtx: dummyCtx,
+    dummyBillboardTex: dummyTex,
+    lastDummyBoardKey: '',
     lastBarKey: '',
     smoothedPose: null,
     walkPhase: 0,
@@ -1859,6 +1953,7 @@ export function disposeFighterRig(rig: FighterRig, scene: THREE.Scene): void {
   });
   rig.eyeTex.dispose();
   rig.overheadTex.dispose();
+  rig.dummyBillboardTex.dispose();
 }
 
 export function poseFighter(
@@ -2035,6 +2130,7 @@ export function poseFighter(
       orb.rotation.z = Math.sin(time * 2.2) * 0.12;
     } else if (rig.id === 'jm') {
       orb.rotation.z = time * 3.8;
+      orb.rotation.y = time * 4.6;
     } else if (rig.id === 'prime') {
       const s = 1.0 + Math.sin(time * 14) * 0.08;
       orb.scale.set(s, s, s);
@@ -2275,6 +2371,60 @@ function updateOverheadBar(rig: FighterRig, actor: ArenaActorState): void {
   ctx.restore();
 
   rig.overheadTex.needsUpdate = true;
+
+  if (actor.isDummy) {
+    rig.dummyBillboardSprite.visible = true;
+    const dKey = `${dummyDps.toFixed(1)}|${dummyBurst}|${dummyPeak.toFixed(0)}`;
+    if (rig.lastDummyBoardKey !== dKey) {
+      rig.lastDummyBoardKey = dKey;
+      const dCtx = rig.dummyBillboardCtx;
+      dCtx.save();
+      dCtx.clearRect(0, 0, 512, 176);
+
+      // High-contrast dark slate panel with crisp cyan/gold frame
+      dCtx.fillStyle = 'rgba(7, 11, 24, 0.94)';
+      dCtx.beginPath();
+      dCtx.roundRect(10, 8, 492, 160, 18);
+      dCtx.fill();
+      dCtx.lineWidth = 5;
+      dCtx.strokeStyle = dummyDps > 0 ? '#38bdf8' : '#64748b';
+      dCtx.stroke();
+
+      dCtx.fillStyle = '#94a3b8';
+      dCtx.font = '900 20px sans-serif';
+      dCtx.textAlign = 'left';
+      dCtx.fillText('TRAINING DUMMY DPS', 28, 38);
+
+      dCtx.textAlign = 'right';
+      dCtx.fillStyle = '#fbbf24';
+      dCtx.fillText(`PEAK ${dummyPeak.toFixed(0)}`, 484, 38);
+
+      // Giant DPS readout
+      dCtx.textAlign = 'left';
+      dCtx.font = '900 66px monospace';
+      dCtx.fillStyle = dummyDps > 0 ? '#38bdf8' : '#cbd5e1';
+      dCtx.fillText(`${dummyDps.toFixed(1)}`, 28, 108);
+
+      // Giant Total Damage readout
+      dCtx.textAlign = 'right';
+      dCtx.font = '900 52px monospace';
+      dCtx.fillStyle = '#fef08a';
+      dCtx.fillText(`${dummyBurst}`, 484, 104);
+
+      dCtx.font = '800 18px sans-serif';
+      dCtx.textAlign = 'left';
+      dCtx.fillStyle = '#7dd3fc';
+      dCtx.fillText('DAMAGE / SEC', 30, 146);
+      dCtx.textAlign = 'right';
+      dCtx.fillStyle = '#fde68a';
+      dCtx.fillText('TOTAL DMG', 484, 146);
+
+      dCtx.restore();
+      rig.dummyBillboardTex.needsUpdate = true;
+    }
+  } else {
+    rig.dummyBillboardSprite.visible = false;
+  }
 }
 
 export function computeActorPose(
@@ -2600,6 +2750,22 @@ export function computeActorPose(
     rig.walkPhase += Math.max(2.5, rig.lastSpeed * 1.45) * dtStep;
   }
 
+  if (actor.channelKind === 'jm_kamehameha_charge') {
+    base.hipY -= 0.18;
+    base.torsoPitch = 0.16;
+    base.torsoYaw = -0.68;
+    base.armLAngle = [-0.85, 0.55, -0.35];
+    base.armRAngle = [-0.75, -0.45, 0.25];
+    base.elbowL = -1.25;
+    base.elbowR = -1.15;
+    base.legLAngle = [-0.42, 0, -0.18];
+    base.kneeL = 0.72;
+    base.legRAngle = [0.32, 0, 0.18];
+    base.kneeR = 0.54;
+    base.auraOpacity = 1.0;
+    return base;
+  }
+
   if (actor.channelKind === 'jm_kamehameha') {
     base.hipY -= 0.08;
     base.torsoPitch = -0.08;
@@ -2612,6 +2778,70 @@ export function computeActorPose(
     base.kneeL = 0.42;
     base.legRAngle = [0.22, 0, 0.14];
     base.kneeR = 0.28;
+    base.auraOpacity = 1.0;
+    return base;
+  }
+
+  if (actor.channelKind === 'jm_sky_uppercut') {
+    base.leanX = -0.22;
+    base.torsoPitch = -0.24;
+    base.armRAngle = [-2.9, -0.15, 0.2];
+    base.armLAngle = [0.45, 0.25, -0.35];
+    base.elbowR = -0.1;
+    base.legLAngle = [-0.45, 0, -0.1];
+    base.kneeL = 0.85;
+    base.auraOpacity = 1.0;
+    return base;
+  }
+
+  if (actor.channelKind === 'jm_sky_peak') {
+    base.hipY += Math.sin(time * 10) * 0.05;
+    base.torsoPitch = 0.14;
+    base.armLAngle = [-1.25, 0.35, -0.4];
+    base.armRAngle = [-1.25, -0.35, 0.4];
+    base.elbowL = -0.8;
+    base.elbowR = -0.8;
+    base.auraOpacity = 0.96;
+    return base;
+  }
+
+  if (actor.channelKind === 'jm_sky_finisher') {
+    const step = actor.skyComboStep ?? 1;
+    if (step >= 4) {
+      base.leanX = 0.36;
+      base.torsoPitch = 0.52;
+      base.armLAngle = [-1.15, 0.2, -0.15];
+      base.armRAngle = [-1.15, -0.2, 0.15];
+      base.elbowL = -0.2;
+      base.elbowR = -0.2;
+    } else if (step === 3) {
+      base.armLAngle = [-1.58, 0.25, -0.06];
+      base.armRAngle = [-1.58, -0.25, 0.06];
+      base.elbowL = -0.08;
+      base.elbowR = -0.08;
+    } else if (step === 2) {
+      base.torsoPitch = -0.25;
+      base.legRAngle = [-1.35, 0, 0.22];
+      base.kneeR = 0.15;
+    } else {
+      const punch = Math.sin(time * 28);
+      base.torsoYaw = punch * 0.65;
+      base.armLAngle = [-1.6 + punch * 0.5, 0.2, -0.2];
+      base.armRAngle = [-1.6 - punch * 0.5, -0.2, 0.2];
+    }
+    base.auraOpacity = 1.0;
+    return base;
+  }
+
+  if (actor.channelKind === 'jm_air_barrage') {
+    const rapid = Math.sin(time * 34);
+    base.hipY += Math.sin(time * 9) * 0.08;
+    base.torsoPitch = 0.32;
+    base.torsoYaw = rapid * 0.24;
+    base.armLAngle = [-1.15 + rapid * 0.28, 0.25, -0.22];
+    base.armRAngle = [-1.15 - rapid * 0.28, -0.25, 0.22];
+    base.elbowL = -0.18;
+    base.elbowR = -0.18;
     base.auraOpacity = 1.0;
     return base;
   }

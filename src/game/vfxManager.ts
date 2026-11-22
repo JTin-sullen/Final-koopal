@@ -8,7 +8,9 @@ import {
   AwakeningOrbState,
   BattlefieldEventState,
   CombatEvent,
+  DomainExpansionState,
   FighterId,
+  KothZoneState,
   MapId,
   ProjectileState,
   TelegraphState,
@@ -248,10 +250,71 @@ interface KamehamehaRig {
   group: THREE.Group;
   chargeCore: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   chargeAura: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  chargeRingA: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  chargeRingB: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   innerBeam: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
   outerBeam: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
+  coilA: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial>;
+  coilB: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial>;
   scorchStrip: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  trenchLeft: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
+  trenchRight: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
   rings: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>[];
+}
+
+interface CraterSlabItem {
+  mesh: THREE.Mesh<THREE.DodecahedronGeometry, THREE.MeshStandardMaterial>;
+  vx: number;
+  vy: number;
+  vz: number;
+  rotVx: number;
+  rotVy: number;
+  rotVz: number;
+  floatTimer: number;
+  floorY: number;
+  life: number;
+  maxLife: number;
+}
+
+interface DarkCraterCrackItem {
+  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  life: number;
+  maxLife: number;
+}
+
+interface SpikeCrownItem {
+  group: THREE.Group;
+  spikes: THREE.Mesh<THREE.ConeGeometry, THREE.MeshBasicMaterial>[];
+  life: number;
+  maxLife: number;
+  baseScale: number;
+}
+
+interface ShockTorusItem {
+  mesh: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  age: number;
+  maxAge: number;
+  startScale: number;
+  maxRadius: number;
+}
+
+interface CrescentRibbonItem {
+  group: THREE.Group;
+  outer: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  inner: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  life: number;
+  maxLife: number;
+  spinSpeed: number;
+  growSpeed: number;
+}
+
+interface VTrenchRidgeItem {
+  group: THREE.Group;
+  leftSlab: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
+  rightSlab: THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
+  glowStrip: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  life: number;
+  maxLife: number;
 }
 
 interface IceNovaRig {
@@ -339,6 +402,12 @@ export class VFXManager {
   private spellSigils: SpellSigilItem[] = [];
   private tethers: TetherItem[] = [];
   private glowHalos: GlowHaloItem[] = [];
+  private craterSlabs: CraterSlabItem[] = [];
+  private darkCracks: DarkCraterCrackItem[] = [];
+  private spikeCrowns: SpikeCrownItem[] = [];
+  private shockTori: ShockTorusItem[] = [];
+  private crescentRibbons: CrescentRibbonItem[] = [];
+  private vTrenchRidges: VTrenchRidgeItem[] = [];
   private delayedTasks: DelayedTask[] = [];
   private elapsedTime = 0;
 
@@ -370,7 +439,7 @@ export class VFXManager {
   private cutsceneCoreRing: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   private clashSparkTimer = 0;
 
-  // Aiming preview reticle (Hold-Drag)
+  // Aiming preview reticle (Hold-Drag + Ground Skill Range Ring)
   private aimGroup: THREE.Group;
   private aimPointRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private aimPointInner: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
@@ -380,6 +449,22 @@ export class VFXManager {
   private aimLineOriginRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private aimConeWedge: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
   private aimDropLine: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
+  private aimRangeRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+
+  // Domain Expansion 3D Barrier & Fighter-Specific Domain Manifestations
+  private domainGroup: THREE.Group;
+  private domainDome: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  private domainBarrierRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  private domainFloorDisc: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+  private domainInnerRune: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  private domainPillars: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>[] = [];
+  private domainGuns: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>[] = [];
+
+  // KOTH Moving Hill Capture Beacon
+  private kothGroup: THREE.Group;
+  private kothOuterRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  private kothInnerDisc: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+  private kothBeacon: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
 
   // Battlefield Event 3D zone visual
   private eventGroup: THREE.Group;
@@ -409,6 +494,12 @@ export class VFXManager {
   private sigilCursor = 0;
   private tetherCursor = 0;
   private lightCursor = 0;
+  private slabCursor = 0;
+  private darkCrackCursor = 0;
+  private spikeCrownCursor = 0;
+  private shockTorusCursor = 0;
+  private crescentCursor = 0;
+  private trenchCursor = 0;
 
   // Shared Geometries (disposed cleanly on dispose())
   private sharedGeos: THREE.BufferGeometry[] = [];
@@ -686,6 +777,218 @@ export class VFXManager {
       gunBoxGeo,
       meteorConeGeo
     );
+
+    // Reference-video CFX pre-allocated shared geometries & pools
+    const slabRockGeo = new THREE.DodecahedronGeometry(0.42, 0);
+    const darkCrackGeo = new THREE.PlaneGeometry(0.24, 2.35);
+    darkCrackGeo.rotateX(-Math.PI * 0.5);
+    const spikeConeGeo = new THREE.ConeGeometry(0.32, 3.6, 5);
+    spikeConeGeo.translate(0, 1.8, 0);
+    const shockTorusGeo = new THREE.TorusGeometry(1.0, 0.16, 10, 28);
+    shockTorusGeo.rotateX(Math.PI * 0.5);
+    const crescentOuterGeo = new THREE.RingGeometry(0.84, 1.38, 22, 1, -0.35, Math.PI * 1.12);
+    const crescentInnerGeo = new THREE.RingGeometry(0.94, 1.22, 22, 1, -0.25, Math.PI * 0.94);
+    const trenchSlabGeo = new THREE.BoxGeometry(0.55, 0.42, 3.2);
+    const kameCoilGeoA = createHelixTubeGeometry(4.5, 1.95, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE);
+    kameCoilGeoA.translate(0, 0, 0.85);
+    const kameCoilGeoB = createHelixTubeGeometry(4.5, 1.95, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE);
+    kameCoilGeoB.rotateZ(Math.PI);
+    kameCoilGeoB.translate(0, 0, 0.85);
+    const kameTrenchRailGeo = new THREE.BoxGeometry(0.65, 0.52, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE);
+    this.sharedGeos.push(
+      slabRockGeo,
+      darkCrackGeo,
+      spikeConeGeo,
+      shockTorusGeo,
+      crescentOuterGeo,
+      crescentInnerGeo,
+      trenchSlabGeo,
+      kameCoilGeoA,
+      kameCoilGeoB,
+      kameTrenchRailGeo
+    );
+
+    for (let i = 0; i < 42; i++) {
+      const mesh = new THREE.Mesh(
+        slabRockGeo,
+        new THREE.MeshStandardMaterial({
+          color: i % 3 === 0 ? 0x0f172a : 0x1e293b,
+          roughness: 0.86,
+          metalness: 0.16,
+          transparent: true,
+          opacity: 0.96,
+        })
+      );
+      mesh.visible = false;
+      scene.add(mesh);
+      this.craterSlabs.push({
+        mesh,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        rotVx: 0,
+        rotVy: 0,
+        rotVz: 0,
+        floatTimer: 0,
+        floorY: 0,
+        life: 0,
+        maxLife: 1.15,
+      });
+    }
+
+    for (let i = 0; i < 32; i++) {
+      const mesh = new THREE.Mesh(
+        darkCrackGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0x0f172a,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
+        })
+      );
+      mesh.visible = false;
+      scene.add(mesh);
+      this.darkCracks.push({ mesh, life: 0, maxLife: 1.2 });
+    }
+
+    for (let i = 0; i < 6; i++) {
+      const group = new THREE.Group();
+      const spikes: THREE.Mesh<THREE.ConeGeometry, THREE.MeshBasicMaterial>[] = [];
+      for (let s = 0; s < 10; s++) {
+        const ang = (s / 10) * Math.PI * 2;
+        const sp = new THREE.Mesh(
+          spikeConeGeo,
+          new THREE.MeshBasicMaterial({
+            color: s % 2 === 0 ? 0xfef08a : 0x38bdf8,
+            transparent: true,
+            opacity: 0.92,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        sp.position.set(Math.cos(ang) * 1.15, 0.25, Math.sin(ang) * 1.15);
+        sp.rotation.y = -ang;
+        sp.rotation.z = -0.56;
+        group.add(sp);
+        spikes.push(sp);
+      }
+      group.visible = false;
+      scene.add(group);
+      this.spikeCrowns.push({ group, spikes, life: 0, maxLife: 0.48, baseScale: 1.0 });
+    }
+
+    for (let i = 0; i < 14; i++) {
+      const mesh = new THREE.Mesh(
+        shockTorusGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xfef08a,
+          transparent: true,
+          opacity: 0.92,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      mesh.visible = false;
+      scene.add(mesh);
+      this.shockTori.push({ mesh, age: 0, maxAge: 0.42, startScale: 0.45, maxRadius: 4.6 });
+    }
+
+    for (let i = 0; i < 18; i++) {
+      const group = new THREE.Group();
+      const outer = new THREE.Mesh(
+        crescentOuterGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.88,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      const inner = new THREE.Mesh(
+        crescentInnerGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xfef9c3,
+          transparent: true,
+          opacity: 0.96,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      group.add(outer, inner);
+      group.visible = false;
+      scene.add(group);
+      this.crescentRibbons.push({
+        group,
+        outer,
+        inner,
+        life: 0,
+        maxLife: 0.28,
+        spinSpeed: 18,
+        growSpeed: 1.6,
+      });
+    }
+
+    for (let i = 0; i < 24; i++) {
+      const group = new THREE.Group();
+      const leftSlab = new THREE.Mesh(
+        trenchSlabGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x1e293b,
+          roughness: 0.88,
+          metalness: 0.14,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false,
+        })
+      );
+      leftSlab.position.set(-1.35, 0.3, 0);
+      leftSlab.rotation.z = 0.56;
+      const rightSlab = new THREE.Mesh(
+        trenchSlabGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x0f172a,
+          roughness: 0.88,
+          metalness: 0.14,
+          transparent: true,
+          opacity: 0.92,
+          depthWrite: false,
+        })
+      );
+      rightSlab.position.set(1.35, 0.3, 0);
+      rightSlab.rotation.z = -0.56;
+      const glowStrip = new THREE.Mesh(
+        this.unitPlaneGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.52,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      glowStrip.scale.set(2.1, 1, 3.2);
+      glowStrip.position.set(0, 0.27, -1.6);
+      group.add(leftSlab, rightSlab, glowStrip);
+      group.visible = false;
+      scene.add(group);
+      this.vTrenchRidges.push({
+        group,
+        leftSlab,
+        rightSlab,
+        glowStrip,
+        life: 0,
+        maxLife: 1.0,
+      });
+    }
 
     for (let i = 0; i < 16; i++) {
       const mesh = new THREE.Mesh(
@@ -1465,15 +1768,15 @@ export class VFXManager {
 
     // Persistent 3D Channel Rigs (JM 5s Super Kamehameha, JM Ice Pillars, Khen Domain, Damen Arsenal, Marjohn Typhoon, Prime Meteor)
     for (let i = 0; i < 2; i++) {
-      // 1. JM 5s Super Kamehameha Rig
+      // 1. JM 5s Super Kamehameha Rig (Golden-White Core + Cyan Outer Shell + Twisting Helical Wind Ribbons + V-Trench Rails)
       const kameGroup = new THREE.Group();
       const chargeCore = new THREE.Mesh(
         kameSphereGeo,
         new THREE.MeshBasicMaterial({
-          color: 0xffffff,
+          color: 0xfef9c3,
           transparent: true,
-          opacity: 0.94,
-          blending: THREE.NormalBlending,
+          opacity: 0.96,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
@@ -1481,50 +1784,119 @@ export class VFXManager {
       const chargeAura = new THREE.Mesh(
         kameSphereGeo,
         new THREE.MeshBasicMaterial({
-          color: 0x0ea5e9,
+          color: 0x38bdf8,
           transparent: true,
-          opacity: 0.48,
-          blending: THREE.NormalBlending,
+          opacity: 0.52,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
       chargeAura.position.set(0, 0, 0.9);
-      chargeAura.scale.setScalar(1.45);
+      chargeAura.scale.setScalar(1.48);
+      const chargeRingA = new THREE.Mesh(
+        kameRingGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xfacc15,
+          transparent: true,
+          opacity: 0.9,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      chargeRingA.position.set(0, 0, 0.9);
+      const chargeRingB = new THREE.Mesh(
+        kameRingGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.85,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      chargeRingB.position.set(0, 0, 0.9);
       const innerBeam = new THREE.Mesh(
         kameCoreGeo,
         new THREE.MeshBasicMaterial({
           color: 0xfef9c3,
           transparent: true,
-          opacity: 0.94,
+          opacity: 0.95,
           side: THREE.FrontSide,
-          blending: THREE.NormalBlending,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
       const outerBeam = new THREE.Mesh(
         kameOuterGeo,
         new THREE.MeshBasicMaterial({
-          color: 0x0ea5e9,
+          color: 0x38bdf8,
           transparent: true,
-          opacity: 0.48,
+          opacity: 0.46,
           side: THREE.FrontSide,
-          blending: THREE.NormalBlending,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      const kCoilA = new THREE.Mesh(
+        kameCoilGeoA,
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.78,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      const kCoilB = new THREE.Mesh(
+        kameCoilGeoB,
+        new THREE.MeshBasicMaterial({
+          color: 0xfef08a,
+          transparent: true,
+          opacity: 0.82,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
       const scorchStrip = new THREE.Mesh(
         this.unitPlaneGeo,
         new THREE.MeshBasicMaterial({
-          color: 0xf59e0b,
+          color: 0xfacc15,
           transparent: true,
           opacity: 0.36,
           side: THREE.DoubleSide,
-          blending: THREE.NormalBlending,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
-      scorchStrip.scale.set(AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH * 0.95, 1, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE);
-      scorchStrip.position.set(0, -0.95, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE * 0.5 + 0.85);
+      scorchStrip.scale.set(AWAKENING_CONFIG.JM_KAMEHAMEHA_WIDTH * 1.05, 1, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE);
+      scorchStrip.position.set(0, -0.95, 0.85);
+      const trenchLeft = new THREE.Mesh(
+        kameTrenchRailGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x1e293b,
+          roughness: 0.88,
+          metalness: 0.15,
+          transparent: true,
+          opacity: 0.88,
+          depthWrite: false,
+        })
+      );
+      trenchLeft.position.set(-1.55, -0.82, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE * 0.5 + 0.85);
+      trenchLeft.rotation.z = 0.54;
+      const trenchRight = new THREE.Mesh(
+        kameTrenchRailGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x0f172a,
+          roughness: 0.88,
+          metalness: 0.15,
+          transparent: true,
+          opacity: 0.88,
+          depthWrite: false,
+        })
+      );
+      trenchRight.position.set(1.55, -0.82, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE * 0.5 + 0.85);
+      trenchRight.rotation.z = -0.54;
+
       const rings: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>[] = [];
       for (let r = 0; r < 5; r++) {
         const ring = new THREE.Mesh(
@@ -1532,20 +1904,46 @@ export class VFXManager {
           new THREE.MeshBasicMaterial({
             color: r % 2 === 0 ? 0xfacc15 : 0x38bdf8,
             transparent: true,
-            opacity: 0.88,
-            blending: THREE.NormalBlending,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending,
             depthWrite: false,
           })
         );
         kameGroup.add(ring);
         rings.push(ring);
       }
-      kameGroup.add(chargeCore, chargeAura, innerBeam, outerBeam, scorchStrip);
+      kameGroup.add(
+        chargeCore,
+        chargeAura,
+        chargeRingA,
+        chargeRingB,
+        innerBeam,
+        outerBeam,
+        kCoilA,
+        kCoilB,
+        scorchStrip,
+        trenchLeft,
+        trenchRight
+      );
       kameGroup.visible = false;
       scene.add(kameGroup);
-      this.kamehamehaRigs.push({ group: kameGroup, chargeCore, chargeAura, innerBeam, outerBeam, scorchStrip, rings });
+      this.kamehamehaRigs.push({
+        group: kameGroup,
+        chargeCore,
+        chargeAura,
+        chargeRingA,
+        chargeRingB,
+        innerBeam,
+        outerBeam,
+        coilA: kCoilA,
+        coilB: kCoilB,
+        scorchStrip,
+        trenchLeft,
+        trenchRight,
+        rings,
+      });
 
-      // 2. JM Divine Sanctuary Nova (10 tall Ice-Gold Crystal Pillars + Dome + Shatter)
+      // 2. JM Divine Sanctuary Nova (10 Towering Sky Pillars + Dome + Shatter)
       const iceGroup = new THREE.Group();
       const iceRing = new THREE.Mesh(
         this.zoneRingGeo,
@@ -1554,7 +1952,7 @@ export class VFXManager {
           transparent: true,
           opacity: 0.9,
           side: THREE.DoubleSide,
-          blending: THREE.NormalBlending,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
@@ -1563,46 +1961,46 @@ export class VFXManager {
       const iceDome = new THREE.Mesh(
         iceDomeGeo,
         new THREE.MeshBasicMaterial({
-          color: 0x0ea5e9,
+          color: 0x38bdf8,
           transparent: true,
           opacity: 0.16,
           side: THREE.DoubleSide,
-          blending: THREE.NormalBlending,
+          blending: THREE.AdditiveBlending,
           depthWrite: false,
         })
       );
-      iceDome.position.y = 0.15;
+      iceDome.position.y = 0.25;
       const icePillars: IceNovaRig['pillars'] = [];
       for (let p = 0; p < 10; p++) {
         const angle = (p / 10) * Math.PI * 2;
         const dist = 3.2 + (p % 2) * 1.45;
-        const heightScale = 0.88 + (p % 3) * 0.22;
+        const heightScale = 1.42 + (p % 3) * 0.34;
         const pMesh = new THREE.Mesh(
           icePillarGeo,
           new THREE.MeshBasicMaterial({
-            color: p % 2 === 0 ? 0x0284c7 : 0xf59e0b,
+            color: p % 2 === 0 ? 0x38bdf8 : 0xfacc15,
             transparent: true,
-            opacity: 0.84,
+            opacity: 0.82,
             side: THREE.DoubleSide,
-            blending: THREE.NormalBlending,
+            blending: THREE.AdditiveBlending,
             depthWrite: false,
           })
         );
         const pCore = new THREE.Mesh(
           icePillarGeo,
           new THREE.MeshBasicMaterial({
-            color: 0xffffff,
+            color: 0xfef9c3,
             transparent: true,
-            opacity: 0.9,
-            blending: THREE.NormalBlending,
+            opacity: 0.94,
+            blending: THREE.AdditiveBlending,
             depthWrite: false,
           })
         );
-        pCore.scale.set(0.35, 0.9, 0.35);
+        pCore.scale.set(0.38, 0.94, 0.38);
         pMesh.add(pCore);
-        pMesh.position.set(Math.cos(angle) * dist, 0.1, Math.sin(angle) * dist);
-        pMesh.rotation.z = Math.cos(angle) * 0.12;
-        pMesh.rotation.x = -Math.sin(angle) * 0.12;
+        pMesh.position.set(Math.cos(angle) * dist, 0.26, Math.sin(angle) * dist);
+        pMesh.rotation.z = Math.cos(angle) * 0.14;
+        pMesh.rotation.x = -Math.sin(angle) * 0.14;
         iceGroup.add(pMesh);
         icePillars.push({ mesh: pMesh, core: pCore, angle, dist, heightScale });
       }
@@ -1977,6 +2375,163 @@ export class VFXManager {
     );
     this.aimDropLine.visible = false;
     scene.add(this.aimDropLine);
+
+    // Ground circular Skill Range Indicator (shows exact skill max reach around caster)
+    const rangeRingGeo = new THREE.RingGeometry(0.955, 1.0, 64);
+    this.sharedGeos.push(rangeRingGeo);
+    this.aimRangeRing = new THREE.Mesh(
+      rangeRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.65,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -3,
+      })
+    );
+    this.aimRangeRing.rotation.x = -Math.PI * 0.5;
+    this.aimRangeRing.visible = false;
+    scene.add(this.aimRangeRing);
+
+    // 3D Domain Expansion Environment Manifestation
+    this.domainGroup = new THREE.Group();
+    const domDomeGeo = new THREE.SphereGeometry(1.0, 28, 18, 0, Math.PI * 2, 0, Math.PI * 0.54);
+    const domPillarGeo = new THREE.CylinderGeometry(0.28, 0.42, 8.5, 8);
+    domPillarGeo.translate(0, 4.25, 0);
+    this.sharedGeos.push(domDomeGeo, domPillarGeo);
+    this.domainDome = new THREE.Mesh(
+      domDomeGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xa855f7,
+        transparent: true,
+        opacity: 0.14,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    this.domainBarrierRing = new THREE.Mesh(
+      this.zoneRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xe879f9,
+        transparent: true,
+        opacity: 0.92,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.domainBarrierRing.rotation.x = -Math.PI * 0.5;
+    this.domainBarrierRing.position.y = 0.28;
+    this.domainFloorDisc = new THREE.Mesh(
+      this.zoneDiscGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0x1e1b4b,
+        transparent: true,
+        opacity: 0.34,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    this.domainFloorDisc.rotation.x = -Math.PI * 0.5;
+    this.domainFloorDisc.position.y = 0.22;
+    this.domainInnerRune = new THREE.Mesh(
+      this.runeOctGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xfef08a,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.domainInnerRune.rotation.x = -Math.PI * 0.5;
+    this.domainInnerRune.position.y = 0.26;
+    this.domainGroup.add(
+      this.domainDome,
+      this.domainBarrierRing,
+      this.domainFloorDisc,
+      this.domainInnerRune
+    );
+    for (let i = 0; i < 8; i++) {
+      const pillar = new THREE.Mesh(
+        domPillarGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xf43f5e,
+          transparent: true,
+          opacity: 0.72,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      this.domainGroup.add(pillar);
+      this.domainPillars.push(pillar);
+
+      const dGun = new THREE.Mesh(
+        gunBoxGeo,
+        new THREE.MeshBasicMaterial({
+          color: 0xfacc15,
+          transparent: true,
+          opacity: 0.9,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      this.domainGroup.add(dGun);
+      this.domainGuns.push(dGun);
+    }
+    this.domainGroup.visible = false;
+    scene.add(this.domainGroup);
+
+    // KOTH Capture Beacon
+    this.kothGroup = new THREE.Group();
+    const kothBeaconGeo = new THREE.CylinderGeometry(0.45, 0.85, 11.0, 14, 1, true);
+    kothBeaconGeo.translate(0, 5.5, 0);
+    this.sharedGeos.push(kothBeaconGeo);
+    this.kothOuterRing = new THREE.Mesh(
+      this.zoneRingGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xfacc15,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.kothOuterRing.rotation.x = -Math.PI * 0.5;
+    this.kothOuterRing.position.y = 0.28;
+    this.kothInnerDisc = new THREE.Mesh(
+      this.zoneDiscGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xfacc15,
+        transparent: true,
+        opacity: 0.22,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.kothInnerDisc.rotation.x = -Math.PI * 0.5;
+    this.kothInnerDisc.position.y = 0.25;
+    this.kothBeacon = new THREE.Mesh(
+      kothBeaconGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xfacc15,
+        transparent: true,
+        opacity: 0.26,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.kothGroup.add(this.kothOuterRing, this.kothInnerDisc, this.kothBeacon);
+    this.kothGroup.visible = false;
+    scene.add(this.kothGroup);
   }
 
   public spawnPointLightFlash(x: number, y: number, z: number, colorHex: number, intensity = 7.5, duration = 0.26, distance = 14): void {
@@ -2371,6 +2926,197 @@ export class VFXManager {
     th.maxLife = duration;
   }
 
+  public spawnCrescentRibbon(
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    rollZ: number,
+    outerHex = 0x38bdf8,
+    innerHex = 0xfef9c3,
+    scale = 1.45,
+    spinSpeed = 20,
+    duration = 0.26,
+    tiltX = Math.PI * 0.42
+  ): void {
+    const cr = this.crescentRibbons[this.crescentCursor % this.crescentRibbons.length];
+    this.crescentCursor++;
+    cr.group.position.set(x, Math.max(0.45, y), z);
+    cr.group.rotation.set(tiltX, yaw, rollZ);
+    cr.group.scale.setScalar(scale);
+    cr.outer.material.color.setHex(outerHex);
+    cr.outer.material.opacity = 0.88;
+    cr.inner.material.color.setHex(innerHex);
+    cr.inner.material.opacity = 0.96;
+    cr.group.visible = true;
+    cr.life = duration;
+    cr.maxLife = duration;
+    cr.spinSpeed = spinSpeed;
+    cr.growSpeed = scale * 0.72;
+  }
+
+  public spawnShockTorus(
+    x: number,
+    y: number,
+    z: number,
+    colorHex = 0xfef08a,
+    startScale = 0.45,
+    maxRadius = 4.6,
+    duration = 0.42
+  ): void {
+    const st = this.shockTori[this.shockTorusCursor % this.shockTori.length];
+    this.shockTorusCursor++;
+    st.mesh.position.set(x, Math.max(0.36, y), z);
+    st.mesh.rotation.set(0, Math.random() * Math.PI, 0);
+    st.mesh.scale.set(startScale, startScale, 1);
+    st.mesh.material.color.setHex(colorHex);
+    st.mesh.material.opacity = 0.94;
+    st.mesh.visible = true;
+    st.age = 0.001;
+    st.maxAge = duration;
+    st.startScale = startScale;
+    st.maxRadius = maxRadius;
+  }
+
+  public spawnSpikeCrown(
+    x: number,
+    groundY: number,
+    z: number,
+    primaryHex = 0xfef08a,
+    secondaryHex = 0x38bdf8,
+    scale = 1.1,
+    duration = 0.48
+  ): void {
+    const sc = this.spikeCrowns[this.spikeCrownCursor % this.spikeCrowns.length];
+    this.spikeCrownCursor++;
+    sc.group.position.set(x, groundY + 0.25, z);
+    sc.group.rotation.y = Math.random() * Math.PI * 2;
+    sc.group.scale.set(scale * 0.65, 0.2, scale * 0.65);
+    sc.baseScale = scale;
+    sc.life = duration;
+    sc.maxLife = duration;
+    for (let i = 0; i < sc.spikes.length; i++) {
+      sc.spikes[i].material.color.setHex(i % 2 === 0 ? primaryHex : secondaryHex);
+      sc.spikes[i].material.opacity = 0.94;
+    }
+    sc.group.visible = true;
+  }
+
+  public spawnDarkSpiderCracks(
+    x: number,
+    groundY: number,
+    z: number,
+    accentHex = 0xfacc15,
+    count = 8,
+    lengthScale = 1.35,
+    duration = 1.25
+  ): void {
+    const eff = Math.max(4, Math.round(count * this.qualityScale));
+    for (let i = 0; i < eff; i++) {
+      const dc = this.darkCracks[this.darkCrackCursor % this.darkCracks.length];
+      this.darkCrackCursor++;
+      const ang = (i / eff) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+      const dist = 0.95 * lengthScale;
+      dc.mesh.position.set(x + Math.sin(ang) * dist, groundY + 0.26, z + Math.cos(ang) * dist);
+      dc.mesh.rotation.set(0, ang, 0);
+      dc.mesh.scale.set(0.85 + Math.random() * 0.55, 1, lengthScale * (0.75 + Math.random() * 0.45));
+      dc.mesh.material.color.setHex(i % 3 === 0 ? 0x0f172a : 0x1e293b);
+      dc.mesh.material.opacity = 0.9;
+      dc.mesh.visible = true;
+      dc.life = duration;
+      dc.maxLife = duration;
+    }
+    this.spawnCracks(x, groundY, z, accentHex, Math.max(3, Math.floor(eff * 0.6)), lengthScale * 0.92, duration * 0.82);
+  }
+
+  public spawnCraterSlabs(
+    x: number,
+    groundY: number,
+    z: number,
+    radius = 3.0,
+    count = 10,
+    zeroGravSec = 0.42
+  ): void {
+    const eff = Math.max(3, Math.round(count * this.qualityScale));
+    const clamped = this.isMobileDevice ? Math.min(eff, 6) : Math.min(eff, 14);
+    for (let i = 0; i < clamped; i++) {
+      const sl = this.craterSlabs[this.slabCursor % this.craterSlabs.length];
+      this.slabCursor++;
+      const ang = (i / clamped) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const rOff = 0.45 + Math.random() * Math.max(0.8, radius * 0.55);
+      sl.mesh.position.set(x + Math.cos(ang) * rOff, groundY + 0.32, z + Math.sin(ang) * rOff);
+      const sx = 0.75 + Math.random() * 0.65;
+      const sy = 0.32 + Math.random() * 0.25;
+      const sz = 0.85 + Math.random() * 0.65;
+      sl.mesh.scale.set(sx, sy, sz);
+      sl.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      const outSpd = 1.8 + Math.random() * 3.4;
+      sl.vx = Math.cos(ang) * outSpd;
+      sl.vy = 5.4 + Math.random() * 3.8;
+      sl.vz = Math.sin(ang) * outSpd;
+      sl.rotVx = (Math.random() - 0.5) * 7.5;
+      sl.rotVy = (Math.random() - 0.5) * 7.5;
+      sl.rotVz = (Math.random() - 0.5) * 7.5;
+      sl.floatTimer = zeroGravSec;
+      sl.floorY = groundY + 0.26;
+      sl.life = 1.15;
+      sl.maxLife = 1.15;
+      sl.mesh.material.opacity = 0.96;
+      sl.mesh.visible = true;
+    }
+  }
+
+  public spawnBeamVTrench(
+    x: number,
+    groundY: number,
+    z: number,
+    dirX: number,
+    dirZ: number,
+    length = 16,
+    colorHex = 0x38bdf8
+  ): void {
+    const yaw = Math.atan2(dirX, dirZ);
+    const steps = Math.min(6, Math.max(3, Math.floor(length / 3.0)));
+    for (let i = 0; i < steps; i++) {
+      const vt = this.vTrenchRidges[this.trenchCursor % this.vTrenchRidges.length];
+      this.trenchCursor++;
+      const dist = 1.6 + i * 3.1;
+      vt.group.position.set(x + dirX * dist, groundY, z + dirZ * dist);
+      vt.group.rotation.set(0, yaw, 0);
+      vt.leftSlab.material.opacity = 0.92;
+      vt.rightSlab.material.opacity = 0.92;
+      vt.glowStrip.material.color.setHex(colorHex);
+      vt.glowStrip.material.opacity = 0.58;
+      vt.life = 1.05;
+      vt.maxLife = 1.05;
+      vt.group.visible = true;
+    }
+    const midX = x + dirX * Math.min(6.5, length * 0.35);
+    const midZ = z + dirZ * Math.min(6.5, length * 0.35);
+    this.spawnCraterSlabs(midX, groundY, midZ, 2.8, 8, 0.32);
+  }
+
+  public spawnCraterSlam(
+    x: number,
+    groundY: number,
+    z: number,
+    radius = 3.6,
+    primaryHex = 0xfef08a,
+    secondaryHex = 0x38bdf8,
+    withCrown = false
+  ): void {
+    this.spawnPointLightFlash(x, groundY + 1.1, z, primaryHex, 8.8, 0.3, 15);
+    this.spawnCoreFlash(x, groundY + 0.85, z, 0xffffff, 2.6, 0.18);
+    this.spawnShockTorus(x, groundY + 0.38, z, primaryHex, 0.5, Math.max(3.6, radius * 1.15), 0.42);
+    this.spawnShockwave(x, groundY + 0.04, z, secondaryHex, Math.max(4.2, radius * 1.35), 0.48);
+    this.spawnDarkSpiderCracks(x, groundY, z, primaryHex, 8, Math.max(1.1, radius * 0.42), 1.35);
+    this.spawnCraterSlabs(x, groundY, z, radius, 11, 0.44);
+    this.spawnSparks(x, groundY + 0.9, z, primaryHex, 18, 1.45, 11, 0.38);
+    if (withCrown) {
+      this.spawnSpikeCrown(x, groundY, z, primaryHex, secondaryHex, Math.max(0.95, radius * 0.32), 0.48);
+    }
+  }
+
   private spawnComboLinkBridge(ev: CombatEvent, mapId: MapId): void {
     if (ev.originX === undefined || ev.originZ === undefined) return;
     const originGround = getMapTerrainHeight(mapId, ev.originX, ev.originZ);
@@ -2442,6 +3188,12 @@ export class VFXManager {
       } else if (fId === 'khen') {
         this.spawnSlash(ev.x + fx * 0.45, wy, ev.z + fz * 0.45, yaw, 0xa855f7, 0.85, Math.PI * 0.12, 0, 0.78, 0.26);
         this.spawnSlash(ev.x + fx * 0.45, wy, ev.z + fz * 0.45, yaw, 0xe879f9, 0.85, Math.PI * 0.12, 0, -0.78, 0.26);
+      } else if (fId === 'jm') {
+        // JM Dragon Counter stance: layered golden-cyan ground rings + orbiting wind/ki crescents
+        this.spawnCoreFlash(ev.x, wy, ev.z, 0xfef9c3, 1.25, 0.14);
+        this.spawnShockwave(ev.x, groundY + 0.04, ev.z, 0x38bdf8, 2.6, 0.32);
+        this.spawnShockwave(ev.x, groundY + 0.08, ev.z, 0xfacc15, 2.0, 0.28);
+        this.spawnCrescentRibbon(ev.x, wy + 0.1, ev.z, yaw, 0.15, 0x38bdf8, 0xfef9c3, 1.25, 22, 0.26, Math.PI * 0.48);
       } else {
         this.spawnCoreFlash(ev.x, wy, ev.z, ev.colorHex, 1.1, 0.12);
       }
@@ -2451,7 +3203,6 @@ export class VFXManager {
     // M1 CASTS (Unique per fighter & 4-hit combos!)
     if (slot === 0) {
       const step = ev.comboStep ?? 1;
-      const isHeavy = ev.m1Variant === 'heavy' || step === 4;
       const hitX = ev.x + fx * 1.15;
       const hitZ = ev.z + fz * 1.15;
 
@@ -2498,32 +3249,36 @@ export class VFXManager {
         }
         this.spawnPuffs(hitX, wy, hitZ, 0x2e1065, step === 4 ? 5 : 2, 0.8, 1.2, 0.35, 1.2, 0.45, 0.5);
       } else {
-        // JM: Ground 4-Hit (Strike -> Strike -> Mini Kamehameha -> Dash Punch Launch) or Aerial Solar Bolt!
+        // JM Celestial Dragon CFX: curved crescent slash ribbons wrapping body/limbs + palm rings + 4th-hit Dash Punch torus & crater slabs!
         const isAirBolt = ev.y > 1.2 && step === 1;
         if (isAirBolt) {
           this.spawnCoreFlash(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xfef9c3, 1.35, 0.11);
+          this.spawnShockTorus(ev.x + fx * 0.6, wy, ev.z + fz * 0.6, 0x38bdf8, 0.32, 1.35, 0.2);
           this.spawnSparks(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xfacc15, 6, 0.9, 2, 0.24);
-        } else if (step === 3) {
-          // 3rd Hit: Mini Energy Beam (Kamehameha)
-          this.spawnCoreFlash(ev.x + fx * 0.75, wy, ev.z + fz * 0.75, 0xffffff, 2.0, 0.16);
-          this.spawnTracer(ev.x + fx * 0.8, wy, ev.z + fz * 0.8, ev.x + fx * 6.5, wy, ev.z + fz * 6.5, 0xfef08a, 2.2, 0.24);
-          this.spawnShockwave(ev.x + fx * 0.8, wy, ev.z + fz * 0.8, 0xfacc15, 2.6, 0.26, Math.PI * 0.5);
-          this.spawnSparks(hitX, wy, hitZ, 0xfef9c3, 12, 1.2, 4, 0.3);
-          this.spawnPointLightFlash(ev.x + fx * 1.2, wy, ev.z + fz * 1.2, 0xfacc15, 6.5, 0.2, 11);
         } else if (step === 4) {
-          // 4th Hit: High-Speed Dash Punch Launch
-          this.spawnCoreFlash(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xffffff, 2.4, 0.15);
-          this.spawnGhost(ev.x, groundY + ev.y - 0.9, ev.z, 0xfacc15, fx * 2.4, 0, fz * 2.4, 0.24, 0.52);
-          this.spawnSlash(hitX, wy, hitZ, yaw, 0xfacc15, 2.0, Math.PI * 0.42, 18);
-          this.spawnShockwave(hitX, groundY, hitZ, 0xfef08a, 4.8, 0.4);
-          this.spawnPillar(hitX, groundY, hitZ, 0xfacc15, 0.85, 0.38);
-          this.spawnSparks(hitX, wy, hitZ, 0xfef08a, 16, 1.3, 6, 0.34);
-          this.spawnPointLightFlash(hitX, wy, hitZ, 0xfef08a, 7.5, 0.25, 13);
+          // 4th Hit: High-Speed Dash Punch Finisher with forward golden shockwave torus + dark crater cracks + 0-G slabs
+          this.spawnCoreFlash(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xfef9c3, 2.4, 0.15);
+          this.spawnGhost(ev.x, groundY + ev.y - 0.9, ev.z, 0x38bdf8, fx * 2.4, 0, fz * 2.4, 0.24, 0.52);
+          this.spawnCrescentRibbon(hitX, wy, hitZ, yaw, 0.25, 0x38bdf8, 0xfef9c3, 1.85, 22, 0.28);
+          this.spawnCraterSlam(hitX, groundY, hitZ, 3.6, 0xfacc15, 0x38bdf8, false);
         } else {
-          this.spawnCoreFlash(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xfef9c3, 1.2, 0.12);
-          this.spawnGhost(ev.x, groundY + ev.y - 0.9, ev.z, 0xfacc15, fx * 1.8, 0, fz * 1.8, 0.2, 0.45);
-          this.spawnSlash(hitX, wy, hitZ, yaw, 0xfacc15, 1.2, Math.PI * 0.42, 16);
-          this.spawnSparks(hitX, wy, hitZ, 0xfef08a, 6, 1.0, 6, 0.3);
+          const swingRoll = step === 1 ? 0.55 : step === 2 ? -0.62 : 0.15;
+          const swingDir = step === 2 ? -22 : 22;
+          this.spawnCoreFlash(ev.x + fx * 0.7, wy, ev.z + fz * 0.7, 0xfef9c3, 1.35, 0.12);
+          this.spawnShockTorus(ev.x + fx * 0.55, wy, ev.z + fz * 0.55, 0xfacc15, 0.28, 1.4, 0.2);
+          this.spawnCrescentRibbon(
+            ev.x + fx * 0.55,
+            wy + 0.05,
+            ev.z + fz * 0.55,
+            yaw,
+            swingRoll,
+            0x38bdf8,
+            0xfef9c3,
+            step === 3 ? 1.65 : 1.35,
+            swingDir,
+            0.25
+          );
+          this.spawnSparks(hitX, wy, hitZ, step % 2 === 0 ? 0x38bdf8 : 0xfef08a, 8, 1.1, 6, 0.28);
         }
       }
       return;
@@ -2556,10 +3311,11 @@ export class VFXManager {
       } else if (fId === 'khen') {
         this.spawnCoreFlash(ev.x + fx * 0.6, wy, ev.z + fz * 0.6, 0xc084fc, 1.5, 0.12);
       } else if (fId === 'jm') {
-        // Heel Drop leap trail
+        // Rising Dragon Kick -> Meteor Heel Drop crescent + streak trail
         const bright = ev.counterFlow || ev.isComboLink;
-        this.spawnCoreFlash(ev.x, wy, ev.z, bright ? 0xffffff : 0xfacc15, bright ? 2.0 : 1.4, 0.14);
-        this.spawnTracer(ev.x, wy, ev.z, ev.x + fx * 2.8, wy + 2.0, ev.z + fz * 2.8, 0xfef08a, bright ? 2.2 : 1.4, 0.26);
+        this.spawnCoreFlash(ev.x, wy, ev.z, 0xfef9c3, bright ? 2.1 : 1.5, 0.14);
+        this.spawnCrescentRibbon(ev.x + fx * 0.5, wy + 0.3, ev.z + fz * 0.5, yaw, 0.65, 0x38bdf8, 0xfef9c3, 1.7, 22, 0.28);
+        this.spawnTracer(ev.x, wy, ev.z, ev.x + fx * 2.8, wy + 2.2, ev.z + fz * 2.8, 0xfef08a, bright ? 2.2 : 1.5, 0.26);
       }
       return;
     }
@@ -2750,9 +3506,11 @@ export class VFXManager {
         this.spawnSlash(ev.x, groundY + ev.y, ev.z, yaw, 0xa855f7, 1.45, Math.PI * 0.15, 0, 0.78);
         this.spawnSlash(ev.x, groundY + ev.y, ev.z, yaw, 0xe879f9, 1.45, Math.PI * 0.15, 0, -0.78);
       } else if (ev.fighterId === 'jm' || ev.counterFlow) {
-        // Dragon Counter: upward-arcing dragon chi-flare clearly charging Counter-Flow
-        this.spawnPillar(ev.x, groundY, ev.z, 0xfacc15, 0.85, 0.48);
-        this.spawnTracer(ev.x, groundY + 0.4, ev.z, ev.x, groundY + 4.2, ev.z, 0xfef08a, 1.8, 0.32);
+        // Dragon Counter Parry: jagged upward shockwave crown + bright flash ring + golden-cyan pillar!
+        this.spawnSpikeCrown(ev.x, groundY, ev.z, 0xfef08a, 0x38bdf8, 1.35, 0.52);
+        this.spawnShockTorus(ev.x, groundY + 0.42, ev.z, 0x38bdf8, 0.6, 5.4, 0.42);
+        this.spawnPillar(ev.x, groundY, ev.z, 0xfacc15, 0.95, 0.5);
+        this.spawnCrescentRibbon(ev.x, groundY + 1.15, ev.z, yaw, 0.2, 0x38bdf8, 0xfef9c3, 1.8, 26, 0.3, Math.PI * 0.46);
       }
       return;
     }
@@ -2829,9 +3587,13 @@ export class VFXManager {
           this.spawnTracer(ev.originX, oy, ev.originZ, ev.x, dy, ev.z, 0x7e22ce, 1.4, 0.24);
           this.spawnGhost(ev.originX, origGround, ev.originZ, 0x581c87, 0, 0, 0, 0.3, 0.65);
         } else {
-          // JM Flash Step: explosive gold origin burst + comet blur
-          this.spawnCoreFlash(ev.originX, oy, ev.originZ, 0xfef08a, 1.9, 0.14);
-          this.spawnTracer(ev.originX, oy, ev.originZ, ev.x, dy, ev.z, 0xfacc15, 2.0, 0.26);
+          // JM Flash Step / Instant Transmission: glowing palm-ring afterimage + spiraling wind ribbons + cyan/gold lightning!
+          this.spawnCoreFlash(ev.originX, oy, ev.originZ, 0xfef9c3, 1.9, 0.14);
+          this.spawnShockTorus(ev.originX, oy, ev.originZ, 0xfacc15, 0.35, 2.4, 0.28);
+          this.spawnCrescentRibbon(ev.originX, oy, ev.originZ, yaw, 0.15, 0x38bdf8, 0xfef9c3, 1.35, 22, 0.24, Math.PI * 0.46);
+          this.spawnTracer(ev.originX, oy, ev.originZ, ev.x, dy, ev.z, 0x38bdf8, 2.0, 0.28);
+          this.spawnTracer(ev.originX, oy + 0.4, ev.originZ, ev.x, dy + 0.4, ev.z, 0xfef08a, 1.25, 0.24);
+          this.spawnShockTorus(ev.x, dy, ev.z, 0x38bdf8, 0.35, 2.2, 0.25);
           this.spawnSparks(ev.originX, oy, ev.originZ, 0xfef9c3, 10, 1.2, 4, 0.3);
         }
       } else {
@@ -2934,14 +3696,8 @@ export class VFXManager {
         this.spawnCracks(ev.x, groundY, ev.z, 0xf97316, 6, 1.4, 0.85);
         this.spawnPuffs(ev.x, groundY + 0.35, ev.z, 0x475569, 6, 1.5, 2.2, 0.45, 1.7, 0.55, 0.52);
       } else if (fId === 'jm' && slot === 3) {
-        // Heel Drop impact: golden crater shockwave + cracks + Meteor link falling-star flash!
-        this.spawnPointLightFlash(ev.x, groundY + 0.8, ev.z, 0xfacc15, 7.8, 0.26, 13);
-        this.spawnCoreFlash(ev.x, groundY + 0.5, ev.z, ev.isComboLink ? 0xffffff : 0xfef08a, ev.isComboLink ? 2.6 : 1.9, 0.18);
-        this.spawnShockwave(ev.x, groundY, ev.z, 0xfacc15, ev.isComboLink ? 7.8 : 6.0, 0.48);
-        this.spawnCracks(ev.x, groundY, ev.z, 0xfef08a, 5, 1.4, 0.8);
-        if (ev.isComboLink) {
-          this.spawnPillar(ev.x, groundY, ev.z, 0xfef9c3, 1.1, 0.42);
-        }
+        // Heel Drop impact: golden-cyan crater shockwave + dark cracks + 0-G stone slabs
+        this.spawnCraterSlam(ev.x, groundY, ev.z, ev.isComboLink ? 5.2 : 4.2, 0xfacc15, 0x38bdf8, Boolean(ev.isComboLink));
       } else {
         this.spawnPointLightFlash(ev.x, groundY + Math.max(0.6, ev.y), ev.z, ev.colorHex, 7.4, 0.26, 14);
         this.spawnCoreFlash(ev.x, groundY + Math.max(0.4, ev.y), ev.z, ev.colorHex, 1.6, 0.15);
@@ -2952,12 +3708,72 @@ export class VFXManager {
     }
 
     if (ev.kind === 'beam') {
-      // JM Solar Dragon Beam
+      // JM Solar Dragon Beam / Super Kamehameha: twin spiral beam + V-trench carved slabs + spike crown!
       this.spawnPointLightFlash(ev.x, groundY + ev.y + 0.5, ev.z, 0xfacc15, 9.5, 0.38, 18);
-      this.spawnCoreFlash(ev.x, groundY + ev.y, ev.z, 0xffffff, 2.8, 0.25);
+      this.spawnCoreFlash(ev.x, groundY + ev.y, ev.z, 0xfef9c3, 2.8, 0.25);
       this.spawnBeam(ev.x, groundY + ev.y, ev.z, ev.dirX ?? 0, ev.dirZ ?? 1, ev.colorHex);
-      this.spawnShockwave(ev.x, groundY, ev.z, 0xfef9c3, 7.2, 0.55);
+      this.spawnBeamVTrench(ev.x, groundY, ev.z, ev.dirX ?? 0, ev.dirZ ?? 1, ev.radius ?? 16, ev.colorHex);
+      this.spawnSpikeCrown(ev.x, groundY, ev.z, 0xfef08a, 0x38bdf8, 1.15, 0.45);
+      this.spawnShockTorus(ev.x, groundY + 0.45, ev.z, 0x38bdf8, 0.6, 5.2, 0.45);
       this.spawnSparks(ev.x, groundY + ev.y, ev.z, 0xfacc15, 22, 1.6, 4, 0.45);
+      return;
+    }
+
+    if (ev.kind === 'craterSlam') {
+      const rad = ev.radius ?? 3.8;
+      this.spawnCraterSlam(
+        ev.x,
+        groundY,
+        ev.z,
+        rad,
+        ev.colorHex === 0x38bdf8 ? 0x38bdf8 : 0xfef08a,
+        ev.colorHex === 0x38bdf8 ? 0xfef08a : 0x38bdf8,
+        Boolean(ev.isCounter)
+      );
+      return;
+    }
+
+    if (ev.kind === 'crescentSlash') {
+      const rad = ev.radius ?? 2.0;
+      const roll = ((ev.comboStep ?? 1) % 2 === 0 ? -0.58 : 0.58);
+      const spin = ((ev.comboStep ?? 1) % 2 === 0 ? -24 : 24);
+      this.spawnCoreFlash(ev.x, groundY + ev.y, ev.z, 0xfef9c3, 1.45, 0.12);
+      this.spawnShockTorus(ev.x, groundY + ev.y, ev.z, 0xfacc15, 0.3, 1.65, 0.22);
+      this.spawnCrescentRibbon(ev.x, groundY + ev.y, ev.z, yaw, roll, 0x38bdf8, 0xfef9c3, Math.max(1.25, rad * 0.72), spin, 0.26);
+      this.spawnSparks(ev.x, groundY + ev.y, ev.z, ev.colorHex, 9, 1.15, 6, 0.28);
+      return;
+    }
+
+    if (ev.kind === 'pillarShatter') {
+      const rad = ev.radius ?? 6.2;
+      this.spawnCraterSlam(ev.x, groundY, ev.z, rad * 0.9, 0xfef08a, 0x38bdf8, true);
+      this.spawnPuffs(ev.x, groundY + 1.0, ev.z, 0x38bdf8, 8, 2.2, 2.4, 0.65, 2.3, 0.55, 0.5);
+      return;
+    }
+
+    if (ev.kind === 'trenchPulse') {
+      const fx = ev.dirX ?? 0;
+      const fz = ev.dirZ ?? 1;
+      const len = Math.min(20, ev.radius ?? 16);
+      this.spawnBeamVTrench(ev.x, groundY, ev.z, fx, fz, len, ev.colorHex);
+      this.spawnShockTorus(ev.x, groundY + 0.45, ev.z, ev.colorHex, 0.55, 4.2, 0.35);
+      return;
+    }
+
+    if (ev.kind === 'chargeAura') {
+      const rad = ev.radius ?? 4.0;
+      this.spawnCoreFlash(ev.x, groundY + ev.y, ev.z, 0xfef9c3, 2.2, 0.24);
+      this.spawnShockTorus(ev.x, groundY + Math.max(0.4, ev.y), ev.z, ev.colorHex, 0.5, rad * 0.95, 0.38);
+      this.spawnShockwave(ev.x, groundY + 0.08, ev.z, 0xfacc15, rad * 1.1, 0.42, -Math.PI * 0.5, true);
+      this.spawnCraterSlabs(ev.x, groundY, ev.z, rad * 0.7, 7, 0.55);
+      return;
+    }
+
+    if (ev.kind === 'skyComboStep') {
+      this.spawnCoreFlash(ev.x, groundY + ev.y, ev.z, 0xfef9c3, 2.1, 0.16);
+      this.spawnCrescentRibbon(ev.x, groundY + ev.y, ev.z, yaw, 0.45, 0x38bdf8, 0xfef9c3, 1.85, 24, 0.28);
+      this.spawnShockTorus(ev.x, groundY + ev.y, ev.z, 0xfacc15, 0.4, 2.8, 0.28);
+      this.spawnSparks(ev.x, groundY + ev.y, ev.z, 0xfef08a, 14, 1.4, 4, 0.32);
       return;
     }
 
@@ -3198,6 +4014,38 @@ export class VFXManager {
 
     if (ev.kind === 'obstacleBreak') {
       this.spawnRubbleBurst(ev.x, groundY, ev.z, ev.radius ?? 2.8, ev.colorHex ?? 0x94a3b8);
+      return;
+    }
+
+    if (ev.kind === 'domainStart' || ev.kind === 'domainClashWin') {
+      const r = ev.radius ?? 14.0;
+      this.spawnPointLightFlash(ev.x, groundY + 2.2, ev.z, ev.colorHex, 14.0, 0.55, 28);
+      this.spawnCoreFlash(ev.x, groundY + 1.4, ev.z, 0xffffff, 3.6, 0.26);
+      this.spawnShockwave(ev.x, groundY + 0.16, ev.z, ev.colorHex, r, 0.72);
+      this.spawnShockwave(ev.x, groundY + 0.22, ev.z, 0xfef08a, r * 0.65, 0.52);
+      this.spawnPillar(ev.x, groundY, ev.z, ev.colorHex, 2.6, 0.78);
+      this.spawnSparks(ev.x, groundY + 1.5, ev.z, ev.colorHex, 24, 1.8, 12, 0.65);
+      return;
+    }
+
+    if (ev.kind === 'domainClashStart') {
+      this.spawnPointLightFlash(ev.x, groundY + 1.8, ev.z, 0xfef08a, 12.0, 0.45, 22);
+      this.spawnShockwave(ev.x, groundY + 0.2, ev.z, 0xfacc15, 11.0, 0.5);
+      this.spawnSparks(ev.x, groundY + 1.4, ev.z, 0xfef08a, 18, 1.5, 10, 0.45);
+      return;
+    }
+
+    if (ev.kind === 'domainJackpot') {
+      this.spawnPointLightFlash(ev.x, groundY + 1.8, ev.z, 0xfacc15, 11.0, 0.4, 18);
+      this.spawnShockwave(ev.x, groundY + 0.2, ev.z, 0xfacc15, 7.5, 0.48);
+      this.spawnMarkGlyph(ev.x, groundY + 1.3, ev.z);
+      this.spawnSparks(ev.x, groundY + 1.2, ev.z, 0xfef08a, 20, 1.4, 9, 0.52);
+      return;
+    }
+
+    if (ev.kind === 'kothCapture') {
+      this.spawnShockwave(ev.x, groundY + 0.2, ev.z, ev.colorHex, ev.radius ?? 5.5, 0.5);
+      this.spawnSparks(ev.x, groundY + 1.0, ev.z, ev.colorHex, 12, 1.1, 6, 0.4);
     }
   }
 
@@ -3428,6 +4276,7 @@ export class VFXManager {
     if (!aim || !aim.active || aim.aimKind === 'none') {
       this.aimGroup.visible = false;
       this.aimDropLine.visible = false;
+      this.aimRangeRing.visible = false;
       return;
     }
 
@@ -3445,6 +4294,17 @@ export class VFXManager {
 
     const aimGroundY = getMapTerrainHeight(mapId, aim.aimX, aim.aimZ);
     const originGroundY = getMapTerrainHeight(mapId, aim.originX, aim.originZ);
+
+    // Always show the circular Skill Range Indicator around the caster while aiming/holding a skill
+    if (aim.range > 0.5) {
+      this.aimRangeRing.visible = true;
+      this.aimRangeRing.position.set(aim.originX, originGroundY + 0.19, aim.originZ);
+      this.aimRangeRing.scale.setScalar(aim.range);
+      this.aimRangeRing.material.color.setHex(color);
+      this.aimRangeRing.material.opacity = aim.cancelled ? 0.34 : 0.62;
+    } else {
+      this.aimRangeRing.visible = false;
+    }
     if ((aim.originY ?? 0) > 0.65) {
       const ox = aim.originX;
       const oy = originGroundY + (aim.originY ?? 0) + 0.6;
@@ -3509,6 +4369,98 @@ export class VFXManager {
       this.aimConeWedge.material.color.setHex(color);
       this.aimConeWedge.material.opacity = aim.cancelled ? 0.14 : 0.4;
     }
+  }
+
+  public syncDomainExpansion(domain: DomainExpansionState | null | undefined, mapId: MapId, elapsed: number): void {
+    if (!domain) {
+      this.domainGroup.visible = false;
+      return;
+    }
+    this.domainGroup.visible = true;
+    const groundY = getMapTerrainHeight(mapId, domain.centerX, domain.centerZ);
+    this.domainGroup.position.set(domain.centerX, groundY, domain.centerZ);
+    const fade = Math.min(1, domain.remaining / 0.8);
+    const r = domain.radius;
+
+    this.domainDome.visible = domain.fighterId !== 'prime';
+    this.domainDome.scale.setScalar(r);
+    this.domainDome.material.color.setHex(
+      domain.fighterId === 'khen'
+        ? 0x090414
+        : domain.fighterId === 'marjohn'
+        ? 0x082f49
+        : domain.fighterId === 'damen'
+        ? 0x451a03
+        : 0xfef9c3
+    );
+    this.domainDome.material.opacity = (domain.fighterId === 'khen' ? 0.46 : 0.18) * fade;
+
+    this.domainBarrierRing.scale.setScalar(r * (1 + Math.sin(elapsed * 6) * 0.015));
+    this.domainBarrierRing.material.color.setHex(domain.primaryHex);
+    this.domainBarrierRing.material.opacity = 0.92 * fade;
+
+    this.domainFloorDisc.scale.setScalar(r);
+    this.domainFloorDisc.material.color.setHex(
+      domain.fighterId === 'khen'
+        ? 0x090314
+        : domain.fighterId === 'prime'
+        ? 0x450a0a
+        : domain.fighterId === 'damen'
+        ? 0x291503
+        : domain.fighterId === 'marjohn'
+        ? 0x042f2e
+        : 0xfef3c7
+    );
+    this.domainFloorDisc.material.opacity = (domain.fighterId === 'khen' ? 0.62 : 0.34) * fade;
+
+    this.domainInnerRune.scale.setScalar(r * (domain.fighterId === 'damen' ? 0.78 : 0.62));
+    this.domainInnerRune.rotation.z = elapsed * (domain.fighterId === 'damen' ? 2.8 : -1.8);
+    this.domainInnerRune.material.color.setHex(domain.fighterId === 'damen' ? 0xfacc15 : domain.primaryHex);
+    this.domainInnerRune.material.opacity = 0.72 * fade;
+
+    const showPillars = domain.fighterId === 'prime' || domain.fighterId === 'jm' || domain.fighterId === 'khen';
+    for (let i = 0; i < this.domainPillars.length; i++) {
+      const pl = this.domainPillars[i];
+      pl.visible = showPillars;
+      if (showPillars) {
+        const ang = (i / this.domainPillars.length) * Math.PI * 2 + elapsed * (domain.fighterId === 'khen' ? 0.4 : 0.15);
+        const dist = r * (domain.fighterId === 'prime' ? 0.85 : 0.78);
+        pl.position.set(Math.cos(ang) * dist, 0, Math.sin(ang) * dist);
+        pl.material.color.setHex(domain.fighterId === 'prime' ? 0xe11d48 : domain.fighterId === 'jm' ? 0xfef08a : 0x7e22ce);
+        pl.material.opacity = 0.62 * fade;
+      }
+
+      const gun = this.domainGuns[i];
+      gun.visible = domain.fighterId === 'damen';
+      if (domain.fighterId === 'damen') {
+        const ang = (i / this.domainGuns.length) * Math.PI * 2 + elapsed * 1.1;
+        const dist = r * 0.66;
+        gun.position.set(Math.cos(ang) * dist, 2.2 + Math.sin(elapsed * 5 + i) * 0.35, Math.sin(ang) * dist);
+        gun.rotation.y = -ang + Math.PI * 0.5;
+        gun.scale.setScalar(domain.jackpotActive ? 1.65 : 1.25);
+        gun.material.color.setHex(domain.jackpotActive ? 0xfef08a : 0xf59e0b);
+        gun.material.opacity = 0.92 * fade;
+      }
+    }
+  }
+
+  public syncKothZone(zone: KothZoneState | null | undefined, mapId: MapId, elapsed: number): void {
+    if (!zone) {
+      this.kothGroup.visible = false;
+      return;
+    }
+    this.kothGroup.visible = true;
+    const groundY = getMapTerrainHeight(mapId, zone.x, zone.z);
+    this.kothGroup.position.set(zone.x, groundY, zone.z);
+    const hex = zone.controllerTeam === 'alpha' ? 0x38bdf8 : zone.controllerTeam === 'beta' ? 0xf43f5e : 0xfacc15;
+    const pulse = 1 + Math.sin(elapsed * 5.5) * 0.03;
+    this.kothOuterRing.scale.setScalar(zone.radius * pulse);
+    this.kothOuterRing.material.color.setHex(hex);
+    this.kothInnerDisc.scale.setScalar(zone.radius);
+    this.kothInnerDisc.material.color.setHex(hex);
+    this.kothInnerDisc.material.opacity = 0.18 + Math.sin(elapsed * 4) * 0.05;
+    this.kothBeacon.material.color.setHex(hex);
+    this.kothBeacon.material.opacity = 0.22 + Math.sin(elapsed * 6) * 0.06;
   }
 
   public syncPickups(pickups: ArenaPickup[], mapId: MapId, elapsed: number): void {
@@ -3770,32 +4722,87 @@ export class VFXManager {
       if (actor.isKO || !actor.channelKind) continue;
       const groundY = getMapTerrainHeight(mapId, actor.x, actor.z);
 
-      if (actor.channelKind === 'jm_kamehameha' && kameIdx < this.kamehamehaRigs.length) {
+      if (actor.channelKind === 'jm_kamehameha_charge' && kameIdx < this.kamehamehaRigs.length) {
         const rig = this.kamehamehaRigs[kameIdx++];
         rig.group.visible = true;
         rig.group.position.set(actor.x, groundY + actor.y + 1.25, actor.z);
         rig.group.rotation.set(0, actor.rotY, 0);
 
-        const flicker = 0.92 + Math.sin(elapsed * 42) * 0.14;
+        const channelDur = actor.channelDuration ?? 0;
+        const prog = channelDur > 0 ? Math.min(1, 1 - (actor.channelTimer ?? 0) / channelDur) : 1;
+        rig.chargeCore.visible = true;
+        rig.chargeAura.visible = true;
+        rig.chargeRingA.visible = true;
+        rig.chargeRingB.visible = true;
+        rig.innerBeam.visible = false;
+        rig.outerBeam.visible = false;
+        rig.coilA.visible = false;
+        rig.coilB.visible = false;
+        rig.scorchStrip.visible = false;
+        rig.trenchLeft.visible = false;
+        rig.trenchRight.visible = false;
+        for (const ring of rig.rings) ring.visible = false;
+
+        rig.chargeCore.scale.setScalar(0.35 + prog * 0.72 + Math.sin(elapsed * 42) * 0.08);
+        rig.chargeAura.scale.setScalar(0.65 + prog * 1.15 + Math.cos(elapsed * 34) * 0.12);
+        rig.chargeRingA.scale.setScalar(0.45 + prog * 0.85);
+        rig.chargeRingA.rotation.set(elapsed * 7, elapsed * 5, 0);
+        rig.chargeRingB.scale.setScalar(0.65 + (1 - prog) * 0.75);
+        rig.chargeRingB.rotation.set(-elapsed * 6, 0, elapsed * 8);
+      } else if (actor.channelKind === 'jm_kamehameha' && kameIdx < this.kamehamehaRigs.length) {
+        const rig = this.kamehamehaRigs[kameIdx++];
+        rig.group.visible = true;
+        rig.group.position.set(actor.x, groundY + actor.y + 1.25, actor.z);
+        rig.group.rotation.set(0, actor.rotY, 0);
+
+        const flicker = 0.94 + Math.sin(elapsed * 42) * 0.14;
         const fade = actor.channelTimer !== undefined && actor.channelTimer < 0.35 ? Math.max(0.1, actor.channelTimer / 0.35) : 1;
-        rig.chargeCore.scale.setScalar((0.78 + Math.sin(elapsed * 32) * 0.12) * fade);
-        rig.chargeAura.scale.setScalar((1.35 + Math.cos(elapsed * 28) * 0.16) * fade);
+        rig.chargeCore.visible = true;
+        rig.chargeAura.visible = true;
+        rig.chargeRingA.visible = true;
+        rig.chargeRingB.visible = true;
+        rig.innerBeam.visible = true;
+        rig.outerBeam.visible = true;
+        rig.coilA.visible = true;
+        rig.coilB.visible = true;
+        rig.scorchStrip.visible = true;
+        rig.trenchLeft.visible = true;
+        rig.trenchRight.visible = true;
+
+        rig.chargeCore.scale.setScalar((0.86 + Math.sin(elapsed * 32) * 0.12) * fade);
+        rig.chargeAura.scale.setScalar((1.45 + Math.cos(elapsed * 28) * 0.16) * fade);
+        rig.chargeRingA.scale.setScalar((1.05 + Math.sin(elapsed * 24) * 0.15) * fade);
+        rig.chargeRingA.rotation.set(0, 0, elapsed * 14);
+        rig.chargeRingB.scale.setScalar((1.28 + Math.cos(elapsed * 22) * 0.15) * fade);
+        rig.chargeRingB.rotation.set(Math.PI * 0.25, elapsed * 10, -elapsed * 12);
+
         rig.innerBeam.scale.set(flicker * fade, flicker * fade, 1);
-        rig.outerBeam.scale.set((1.05 + Math.cos(elapsed * 36) * 0.12) * fade, (1.05 + Math.cos(elapsed * 36) * 0.12) * fade, 1);
+        rig.outerBeam.scale.set((1.1 + Math.cos(elapsed * 36) * 0.12) * fade, (1.1 + Math.cos(elapsed * 36) * 0.12) * fade, 1);
         rig.outerBeam.rotation.z = elapsed * 8;
-        rig.innerBeam.material.opacity = 0.94 * fade;
+        rig.innerBeam.material.opacity = 0.95 * fade;
         rig.outerBeam.material.opacity = 0.48 * fade;
-        rig.scorchStrip.position.set(0, -(actor.y + 1.25) + 0.28, AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE * 0.5 + 0.85);
-        rig.scorchStrip.material.opacity = (0.34 + Math.sin(elapsed * 26) * 0.1) * fade;
+        rig.coilA.rotation.z = elapsed * 15;
+        rig.coilB.rotation.z = elapsed * 15;
+        rig.coilA.material.opacity = 0.82 * fade;
+        rig.coilB.material.opacity = 0.86 * fade;
+
+        const floorOffY = -(actor.y + 1.25) + 0.28;
+        rig.scorchStrip.position.set(0, floorOffY, 0.85);
+        rig.scorchStrip.material.opacity = (0.36 + Math.sin(elapsed * 26) * 0.1) * fade;
+        rig.trenchLeft.position.y = floorOffY + 0.08;
+        rig.trenchRight.position.y = floorOffY + 0.08;
+        rig.trenchLeft.material.opacity = 0.88 * fade;
+        rig.trenchRight.material.opacity = 0.88 * fade;
 
         for (let r = 0; r < rig.rings.length; r++) {
           const ring = rig.rings[r];
-          const slide = ((elapsed * 3.2 + r / rig.rings.length) % 1) * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
+          ring.visible = true;
+          const slide = ((elapsed * 3.6 + r / rig.rings.length) % 1) * AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE;
           ring.position.set(0, 0, 1.2 + slide);
-          ring.rotation.z = elapsed * (r % 2 === 0 ? 10 : -10);
-          const sc = (0.78 + Math.sin(elapsed * 20 + r) * 0.18) * fade;
+          ring.rotation.z = elapsed * (r % 2 === 0 ? 11 : -11);
+          const sc = (0.85 + Math.sin(elapsed * 20 + r) * 0.18) * fade;
           ring.scale.setScalar(sc);
-          ring.material.opacity = (1 - slide / AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE * 0.5) * 0.88 * fade;
+          ring.material.opacity = (1 - (slide / AWAKENING_CONFIG.JM_KAMEHAMEHA_RANGE) * 0.45) * 0.9 * fade;
         }
       } else if (actor.channelKind === 'khen_domain' && khenIdx < this.khenDomainRigs.length) {
         const rig = this.khenDomainRigs[khenIdx++];
@@ -3920,10 +4927,7 @@ export class VFXManager {
       if (age >= shatterAt && !this.shatteredIceZoneIds.has(z.id)) {
         if (this.shatteredIceZoneIds.size > 16) this.shatteredIceZoneIds.clear();
         this.shatteredIceZoneIds.add(z.id);
-        this.spawnCoreFlash(z.x, groundY + 1.5, z.z, 0xffffff, 3.2, 0.22);
-        this.spawnShockwave(z.x, groundY + z.y, z.z, 0x38bdf8, z.radius * 1.35, 0.55);
-        this.spawnShockwave(z.x, groundY + z.y + 0.15, z.z, 0xfef08a, z.radius * 1.05, 0.44);
-        this.spawnSparks(z.x, groundY + 1.6, z.z, 0x38bdf8, 22, 1.5, 10, 0.45);
+        this.spawnCraterSlam(z.x, groundY, z.z, z.radius * 0.95, 0xfef08a, 0x38bdf8, true);
       }
 
       rig.ring.scale.setScalar(z.radius * (1 + Math.sin(elapsed * 10) * 0.04));
@@ -4028,14 +5032,50 @@ export class VFXManager {
     }
   }
 
-  public emitAwakenedStatusParticles(x: number, y: number, z: number, colorHex: number): void {
+  public emitAwakenedStatusParticles(x: number, y: number, z: number, colorHex: number, fighterId?: FighterId): void {
     const a = Math.random() * Math.PI * 2;
-    const rad = 0.35 + Math.random() * 0.45;
+    const rad = 0.42 + Math.random() * 0.65;
     const px = x + Math.cos(a) * rad;
     const pz = z + Math.sin(a) * rad;
-    this.spawnSparks(px, y + 0.55 + Math.random() * 0.7, pz, colorHex, 2, 0.55, 1.6, 0.32);
-    this.spawnSparks(px, y + 0.4 + Math.random() * 0.5, pz, 0xfef9c3, 1, 0.45, 1.2, 0.26);
-    this.spawnPuffs(px, y + 0.18, pz, colorHex, 1, 0.3, 0.65, 0.16, 0.48, 0.34, 0.38);
+    this.spawnSparks(px, y + 0.55 + Math.random() * 0.8, pz, colorHex, 2, 0.55, -2.5, 0.36);
+    this.spawnSparks(px, y + 0.4 + Math.random() * 0.6, pz, 0xfef9c3, 1, 0.45, -2.0, 0.28);
+    this.spawnPuffs(px, y + 0.26, pz, colorHex, 1, 0.3, 0.65, 0.16, 0.48, 0.34, 0.38);
+
+    if (fighterId === 'jm') {
+      // Spiraling horizontal wind/ki crescent + crackling cyan/gold lightning arc + trembling hovering floor pebbles
+      if (Math.random() < 0.45) {
+        this.spawnCrescentRibbon(
+          x,
+          y + 0.65 + Math.random() * 0.7,
+          z,
+          a,
+          0.12,
+          0x38bdf8,
+          0xfef9c3,
+          1.25 + Math.random() * 0.35,
+          16,
+          0.26,
+          Math.PI * 0.48
+        );
+      }
+      if (Math.random() < 0.38) {
+        const a2 = a + (Math.random() - 0.5) * 1.4;
+        this.spawnTracer(
+          px,
+          y + 0.35,
+          pz,
+          x + Math.cos(a2) * (rad + 0.85),
+          y + 1.2 + Math.random() * 1.4,
+          z + Math.sin(a2) * (rad + 0.85),
+          Math.random() < 0.5 ? 0x38bdf8 : 0xfef08a,
+          0.68,
+          0.18
+        );
+      }
+      if (Math.random() < 0.24) {
+        this.spawnCraterSlabs(x, Math.max(0, y - 0.05), z, 2.1, 1, 0.52);
+      }
+    }
   }
 
   public update(dt: number): void {
@@ -4305,6 +5345,101 @@ export class VFXManager {
         halo.mesh.material.opacity = u * halo.peakOpacity;
       }
     }
+
+    for (const sl of this.craterSlabs) {
+      if (!sl.mesh.visible) continue;
+      sl.life -= dt;
+      if (sl.life <= 0) {
+        sl.mesh.visible = false;
+      } else {
+        if (sl.floatTimer > 0) {
+          // Brief 0-G pop/hover & spin phase matching reference video
+          sl.floatTimer -= dt;
+          sl.mesh.position.x += sl.vx * 0.25 * dt;
+          sl.mesh.position.y += sl.vy * 0.22 * dt;
+          sl.mesh.position.z += sl.vz * 0.25 * dt;
+          sl.vy *= Math.max(0, 1 - 4.2 * dt);
+        } else {
+          sl.mesh.position.x += sl.vx * dt;
+          sl.mesh.position.y += sl.vy * dt;
+          sl.mesh.position.z += sl.vz * dt;
+          sl.vy -= 22.0 * dt;
+          if (sl.mesh.position.y < sl.floorY) {
+            sl.mesh.position.y = sl.floorY;
+            sl.vy = Math.abs(sl.vy) * 0.25;
+            sl.vx *= 0.6;
+            sl.vz *= 0.6;
+          }
+        }
+        sl.mesh.rotation.x += sl.rotVx * dt;
+        sl.mesh.rotation.y += sl.rotVy * dt;
+        sl.mesh.rotation.z += sl.rotVz * dt;
+        sl.mesh.material.opacity = Math.min(0.96, (sl.life / sl.maxLife) * 1.45);
+      }
+    }
+
+    for (const dc of this.darkCracks) {
+      if (!dc.mesh.visible) continue;
+      dc.life -= dt;
+      if (dc.life <= 0) dc.mesh.visible = false;
+      else dc.mesh.material.opacity = (dc.life / dc.maxLife) * 0.88;
+    }
+
+    for (const sc of this.spikeCrowns) {
+      if (!sc.group.visible) continue;
+      sc.life -= dt;
+      if (sc.life <= 0) {
+        sc.group.visible = false;
+      } else {
+        const u = 1 - sc.life / sc.maxLife;
+        const rise = u < 0.22 ? THREE.MathUtils.lerp(0.18, 1.15, u / 0.22) : THREE.MathUtils.lerp(1.15, 0.85, (u - 0.22) / 0.78);
+        const radial = sc.baseScale * (0.65 + u * 0.72);
+        sc.group.scale.set(radial, rise * sc.baseScale, radial);
+        const op = (1 - u) * 0.94;
+        for (const sp of sc.spikes) sp.material.opacity = op;
+      }
+    }
+
+    for (const st of this.shockTori) {
+      if (!st.mesh.visible) continue;
+      st.age += dt;
+      if (st.age >= st.maxAge) {
+        st.mesh.visible = false;
+      } else {
+        const u = st.age / st.maxAge;
+        const rad = st.startScale + u * st.maxRadius;
+        st.mesh.scale.set(rad, rad, Math.max(0.35, 1 - u * 0.65));
+        st.mesh.material.opacity = (1 - u) * 0.9;
+      }
+    }
+
+    for (const cr of this.crescentRibbons) {
+      if (!cr.group.visible) continue;
+      cr.life -= dt;
+      if (cr.life <= 0) {
+        cr.group.visible = false;
+      } else {
+        const u = cr.life / cr.maxLife;
+        cr.group.rotation.z += cr.spinSpeed * dt;
+        cr.group.scale.addScalar(cr.growSpeed * dt);
+        cr.outer.material.opacity = u * 0.88;
+        cr.inner.material.opacity = u * 0.96;
+      }
+    }
+
+    for (const vt of this.vTrenchRidges) {
+      if (!vt.group.visible) continue;
+      vt.life -= dt;
+      if (vt.life <= 0) {
+        vt.group.visible = false;
+      } else {
+        const u = vt.life / vt.maxLife;
+        const op = Math.min(0.92, u * 1.4);
+        vt.leftSlab.material.opacity = op;
+        vt.rightSlab.material.opacity = op;
+        vt.glowStrip.material.opacity = u * 0.56;
+      }
+    }
   }
 
   public dispose(): void {
@@ -4387,8 +5522,51 @@ export class VFXManager {
     this.scene.remove(this.aimDropLine);
     this.aimDropLine.material.dispose();
 
+    this.scene.remove(this.aimRangeRing);
+    this.aimRangeRing.material.dispose();
+
+    this.scene.remove(this.domainGroup);
+    this.domainDome.material.dispose();
+    this.domainBarrierRing.material.dispose();
+    this.domainFloorDisc.material.dispose();
+    this.domainInnerRune.material.dispose();
+    for (const pl of this.domainPillars) pl.material.dispose();
+    for (const g of this.domainGuns) g.material.dispose();
+    this.domainPillars = [];
+    this.domainGuns = [];
+
+    this.scene.remove(this.kothGroup);
+    this.kothOuterRing.material.dispose();
+    this.kothInnerDisc.material.dispose();
+    this.kothBeacon.material.dispose();
+
     removeAndDisposeMats(this.glowHalos);
     this.glowHalos = [];
+
+    removeAndDisposeMats(this.craterSlabs);
+    this.craterSlabs = [];
+    removeAndDisposeMats(this.darkCracks);
+    this.darkCracks = [];
+    removeAndDisposeMats(this.shockTori);
+    this.shockTori = [];
+    for (const sc of this.spikeCrowns) {
+      this.scene.remove(sc.group);
+      for (const sp of sc.spikes) sp.material.dispose();
+    }
+    this.spikeCrowns = [];
+    for (const cr of this.crescentRibbons) {
+      this.scene.remove(cr.group);
+      cr.outer.material.dispose();
+      cr.inner.material.dispose();
+    }
+    this.crescentRibbons = [];
+    for (const vt of this.vTrenchRidges) {
+      this.scene.remove(vt.group);
+      vt.leftSlab.material.dispose();
+      vt.rightSlab.material.dispose();
+      vt.glowStrip.material.dispose();
+    }
+    this.vTrenchRidges = [];
 
     for (const vis of this.zonePool) {
       this.scene.remove(vis.group);
@@ -4444,9 +5622,15 @@ export class VFXManager {
       this.scene.remove(rig.group);
       rig.chargeCore.material.dispose();
       rig.chargeAura.material.dispose();
+      rig.chargeRingA.material.dispose();
+      rig.chargeRingB.material.dispose();
       rig.innerBeam.material.dispose();
       rig.outerBeam.material.dispose();
+      rig.coilA.material.dispose();
+      rig.coilB.material.dispose();
       rig.scorchStrip.material.dispose();
+      rig.trenchLeft.material.dispose();
+      rig.trenchRight.material.dispose();
       for (const r of rig.rings) r.material.dispose();
     }
     this.kamehamehaRigs = [];

@@ -24,6 +24,111 @@ export type ActorActionState =
 export type EliminationStyle = 'collapse' | 'launch' | 'shatter' | 'dissolve';
 export type KoCause = 'normal' | 'parry' | 'combo' | 'ultimate' | 'clash' | 'grab' | 'ring';
 export type BattlefieldEventKind = 'frenzy' | 'gravity' | 'hazard' | 'surge';
+export type GameModeId = 'classic' | 'raid_boss' | 'koth' | 'squad_clash' | 'sudden_death';
+export type TeamId = 'alpha' | 'beta' | 'boss' | 'raiders';
+
+export interface GameModeSpec {
+  id: GameModeId;
+  name: string;
+  shortLabel: string;
+  badgeColor: string;
+  description: string;
+  playersHint: string;
+}
+
+export const GAME_MODES: GameModeSpec[] = [
+  {
+    id: 'classic',
+    name: 'Classic Arena',
+    shortLabel: 'CLASSIC FFA',
+    badgeColor: '#38bdf8',
+    description: 'Free-for-all showdown. First to 2 round wins claims victory; 1v1 duels unlock Awakening Orbs at 90s.',
+    playersHint: '1v1 / FFA',
+  },
+  {
+    id: 'raid_boss',
+    name: 'Raid Boss (1v4)',
+    shortLabel: '1v4 RAID BOSS',
+    badgeColor: '#f43f5e',
+    description: '1 Juggernaut Boss spawns permanently Awakened with 3.5x HP and rapid Domain charge against 4 united Raiders.',
+    playersHint: '1v4 Co-op',
+  },
+  {
+    id: 'koth',
+    name: 'King of the Hill',
+    shortLabel: 'KING OF HILL',
+    badgeColor: '#facc15',
+    description: 'Moving capture zone shifts every 30s! Standing inside scores points and doubles Domain & Chi charge for 3 minutes.',
+    playersHint: '3m Respawn',
+  },
+  {
+    id: 'squad_clash',
+    name: 'Squad Clash',
+    shortLabel: 'SQUAD 2v2',
+    badgeColor: '#a855f7',
+    description: 'Team Alpha vs Team Beta with friendly-fire disabled and instant respawns. First squad to 10 KOs wins!',
+    playersHint: 'First to 10',
+  },
+  {
+    id: 'sudden_death',
+    name: 'Overdrive Sudden Death',
+    shortLabel: 'OVERDRIVE',
+    badgeColor: '#f97316',
+    description: 'Spawn 100% Awakened with 100% Domain Gauge and halved cooldowns inside an active shrinking storm ring!',
+    playersHint: 'Max Chaos',
+  },
+];
+
+export const GAME_MODE_BY_ID: Record<GameModeId, GameModeSpec> = Object.fromEntries(
+  GAME_MODES.map((m) => [m.id, m])
+) as Record<GameModeId, GameModeSpec>;
+
+export interface DomainExpansionState {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  fighterId: FighterId;
+  domainName: string;
+  centerX: number;
+  centerZ: number;
+  radius: number;
+  remaining: number;
+  duration: number;
+  sureHitTimer: number;
+  primaryHex: number;
+  secondaryHex: number;
+  jackpotActive?: boolean;
+  jackpotHits?: number;
+}
+
+export interface DomainClashState {
+  id: string;
+  p1Id: string;
+  p2Id: string;
+  p1Name: string;
+  p2Name: string;
+  p1FighterId: FighterId;
+  p2FighterId: FighterId;
+  p1DomainName: string;
+  p2DomainName: string;
+  balance: number; // -1 (P1 dominates) .. +1 (P2 dominates)
+  p1Mashes: number;
+  p2Mashes: number;
+  remaining: number;
+  duration: number;
+}
+
+export interface KothZoneState {
+  x: number;
+  z: number;
+  radius: number;
+  shiftRemaining: number;
+  scores: Record<string, number>;
+  controllerId?: string | null;
+  controllerName?: string | null;
+  controllerTeam?: TeamId | null;
+  contested?: boolean;
+}
 
 export type AbilityAimKind = 'none' | 'point' | 'line' | 'cone';
 export type AimKind = AbilityAimKind;
@@ -46,7 +151,12 @@ export type ArenaZoneKind =
 export type TelegraphKind = 'circle' | 'line' | 'cone';
 export type ChannelKind =
   | 'jm_kamehameha'
+  | 'jm_kamehameha_charge'
   | 'jm_nova_slam'
+  | 'jm_sky_uppercut'
+  | 'jm_sky_peak'
+  | 'jm_sky_finisher'
+  | 'jm_air_barrage'
   | 'khen_domain'
   | 'damen_arsenal'
   | 'marjohn_typhoon'
@@ -211,16 +321,16 @@ export const FIGHTERS: FighterSpec[] = [
         slot: 0,
         name: 'Tornado Poke',
         role: 'Attack',
-        shortDesc: 'Fires a steady mid-range mini-tornado every 0.9s. Hold-Drag M1 to swipe-aim!',
+        shortDesc: 'Fires a high-velocity mid-range mini-tornado every 0.9s. Hold-Drag M1 to swipe-aim!',
         cooldown: 0.9,
         manaCost: 0,
         staminaCost: 8,
         duration: 0.24,
         windup: 0.08,
         whiffRecovery: 0.22,
-        damage: 12,
-        staggerDamage: 15,
-        range: 7.6,
+        damage: 14,
+        staggerDamage: 16,
+        range: 8.6,
         arcCos: 0.5,
         knockback: 4.5,
         keyHint: 'M1',
@@ -248,15 +358,15 @@ export const FIGHTERS: FighterSpec[] = [
         name: 'Cloud Vault',
         role: 'Skill',
         shortDesc: 'Vault skyward and slam down with a cyclone shockwave. Hold-Drag to aim landing!',
-        cooldown: 5.5,
+        cooldown: 5.0,
         manaCost: 20,
         staminaCost: 18,
-        duration: 0.46,
-        windup: 0.26,
-        whiffRecovery: 0.42,
-        damage: 17,
-        staggerDamage: 24,
-        range: 3.8,
+        duration: 0.44,
+        windup: 0.22,
+        whiffRecovery: 0.36,
+        damage: 23,
+        staggerDamage: 26,
+        range: 4.0,
         arcCos: -1,
         knockback: 8.5,
         keyHint: '1',
@@ -271,15 +381,15 @@ export const FIGHTERS: FighterSpec[] = [
         name: 'Cyclone Vortex',
         role: 'Skill',
         shortDesc: 'Tap: 360° vortex. Hold-Drag: Plant Gale Snare Trap -> Stage 2 Skyburst Launch!',
-        cooldown: 5.8,
+        cooldown: 5.4,
         manaCost: 26,
         staminaCost: 20,
-        duration: 0.52,
-        windup: 0.3,
-        whiffRecovery: 0.52,
-        damage: 20,
-        staggerDamage: 28,
-        range: 4.6,
+        duration: 0.48,
+        windup: 0.26,
+        whiffRecovery: 0.44,
+        damage: 26,
+        staggerDamage: 30,
+        range: 4.8,
         arcCos: -1,
         knockback: 9.0,
         keyHint: '2',
@@ -295,15 +405,15 @@ export const FIGHTERS: FighterSpec[] = [
         name: 'Tempest Typhoon',
         role: 'Ultimate',
         shortDesc: 'Hold-Drag aims telegraphed storm funnel before wind-shear typhoon. Clash-able!',
-        cooldown: 12.0,
+        cooldown: 11.5,
         manaCost: 58,
         staminaCost: 28,
-        duration: 0.78,
-        windup: 0.46,
-        whiffRecovery: 0.65,
-        damage: 34,
-        staggerDamage: 46,
-        range: 5.6,
+        duration: 0.74,
+        windup: 0.42,
+        whiffRecovery: 0.58,
+        damage: 42,
+        staggerDamage: 48,
+        range: 5.8,
         arcCos: -1,
         knockback: 14.5,
         keyHint: '3',
@@ -743,18 +853,18 @@ export const FIGHTERS: FighterSpec[] = [
     koStyle: 'collapse',
     passive: {
       name: 'Sky Flight',
-      shortDesc: 'Press E to toggle Sky Flight up to 7s (10s CD). Aim skills down & fire golden bolts!',
+      shortDesc: 'Press E/R to toggle Sky Flight up to 7s (10s CD). Aim skills down & fire golden bolts!',
       frenzyBonus: 'Auto-regenerates 3 HP/sec below 40% HP inside Frenzy Zones.',
     },
     m1Combo: {
-      stepNames: ['Solar Strike', 'Cross Kick', 'Mini Kamehameha', 'Dash Launch'],
-      heavyFinisherName: 'High-Speed Dash Punch',
+      stepNames: ['Solar Strike', 'Cross Kick', 'Solar Crescent', 'Dash Finisher'],
+      heavyFinisherName: 'Dash Punch Shockwave',
       aerialName: 'Solar Air Bolt',
       rangeIdentity: 'Counter Striker',
     },
     comboLink: {
       triggerName: 'SOVEREIGN METEOR',
-      hint: 'Flash Step (1) → Heel Drop (2)',
+      hint: 'Flash Step (1) → M1 x3 → Rising Kick (2) → Heel Drop (2)',
       bonusDamage: 14,
       bonusStagger: 28,
     },
@@ -763,7 +873,7 @@ export const FIGHTERS: FighterSpec[] = [
         slot: 0,
         name: 'Sovereign 4-Hit',
         role: 'Attack',
-        shortDesc: 'Fast 0.42s melee: Strike -> Kick -> Mini Beam -> Dash Punch! Air M1 fires golden bolts.',
+        shortDesc: 'Hits 1–3 cancel cleanly into Flash Step (1), Skill 2 (2), or Dash (Q)! Hit 4 triggers crater Dash Punch.',
         cooldown: 0.42,
         manaCost: 0,
         staminaCost: 7,
@@ -774,14 +884,14 @@ export const FIGHTERS: FighterSpec[] = [
         staggerDamage: 14,
         range: 3.35,
         arcCos: 0.2,
-        knockback: 4.5,
+        knockback: 4.2,
         keyHint: 'M1',
       },
       {
         slot: 1,
         name: 'Dragon Counter',
         role: 'Guard',
-        shortDesc: '0.26s Parry counters attackers with uppercut DMG & Counter-Flow!',
+        shortDesc: '0.26s Parry blinks JM behind the attacker in slow-mo stun & resets Flash Step (1) cooldown!',
         cooldown: 1.2,
         manaCost: 0,
         staminaCost: 12,
@@ -792,65 +902,66 @@ export const FIGHTERS: FighterSpec[] = [
         staggerDamage: 24,
         range: 3.1,
         arcCos: -1,
-        knockback: 9.5,
+        knockback: 1.5,
         keyHint: 'F',
       },
       {
         slot: 2,
         name: 'Flash Step',
         role: 'Skill',
-        shortDesc: 'High-speed golden afterimage palm burst through foes. Hold-Drag aims corridor!',
+        shortDesc: 'Stagger dash leaving hit foe right in front of JM for a full M1 combo. Hold-Drag aims corridor!',
         cooldown: 5.5,
         manaCost: 20,
         staminaCost: 18,
-        duration: 0.46,
-        windup: 0.28,
-        whiffRecovery: 0.38,
+        duration: 0.44,
+        windup: 0.22,
+        whiffRecovery: 0.34,
         damage: 17,
         staggerDamage: 24,
         range: 7.5,
         arcCos: 0.2,
-        knockback: 8.5,
+        knockback: 0.6,
         keyHint: '1',
         aimKind: 'line',
         aimRange: 7.5,
         aimRadius: 2.2,
         holdAimLabel: 'Flash Lane',
-        actionTag: 'Blink · Solar Palm',
+        actionTag: 'Blink · Stagger Palm',
       },
       {
         slot: 3,
-        name: 'Heel Drop',
+        name: 'Rising Kick / Heel Drop',
         role: 'Skill',
-        shortDesc: 'Tap: Radial burst slam. Hold-Drag: Plant Solar Sanctuary Ward that repulses rushers!',
+        shortDesc: 'Stage 1: Rising Dragon Kick launches foe skyward. Recast / Air Tap: Meteor Heel Drop ground-bounce! Hold-Drag: Sanctuary.',
         cooldown: 5.5,
         manaCost: 26,
         staminaCost: 20,
-        duration: 0.54,
-        windup: 0.28,
-        whiffRecovery: 0.54,
+        duration: 0.5,
+        windup: 0.22,
+        whiffRecovery: 0.48,
         damage: 23,
         staggerDamage: 30,
         range: 4.4,
         arcCos: -1,
-        knockback: 11.5,
+        knockback: 5.5,
         keyHint: '2',
         aimKind: 'point',
         aimRange: 8.5,
         aimRadius: 3.5,
+        stage2Label: 'HEEL DROP',
         holdAimLabel: 'Sanctuary',
-        actionTag: 'Slam · Solar Ward',
+        actionTag: 'Launch · Heel Bounce',
       },
       {
         slot: 4,
         name: 'Solar Dragon Beam',
         role: 'Ultimate',
-        shortDesc: 'Hold-Drag aims telegraphed golden beam corridor before firing twin-spiral beam!',
+        shortDesc: 'Twin-spiral golden-cyan beam wrapped in wind ribbons that carves a V-shaped ground trench!',
         cooldown: 12.5,
         manaCost: 58,
         staminaCost: 30,
         duration: 0.94,
-        windup: 0.46,
+        windup: 0.44,
         whiffRecovery: 0.72,
         damage: 38,
         staggerDamage: 46,
@@ -862,7 +973,7 @@ export const FIGHTERS: FighterSpec[] = [
         aimRange: 14.5,
         aimRadius: 2.3,
         holdAimLabel: 'Beam Lane',
-        actionTag: 'Golden Beam · Line',
+        actionTag: 'V-Trench · Dragon Beam',
       },
     ],
   },
@@ -1593,6 +1704,7 @@ export interface RoomPlayer {
   wins: number;
   isBot?: boolean;
   isDummy?: boolean;
+  team?: TeamId;
 }
 
 export interface ArenaPickup {
@@ -1747,6 +1859,10 @@ export interface ArenaActorState {
   channelDuration?: number;
   channelTargetX?: number;
   channelTargetZ?: number;
+  skyComboPrompt?: boolean;
+  skyComboStep?: number;
+  skyComboMashes?: number;
+  skyComboTargetId?: string | null;
   isKO: boolean;
   koTime: number | null;
   koStyle: EliminationStyle;
@@ -1754,8 +1870,15 @@ export interface ArenaActorState {
   koByFighterId?: FighterId;
   wins: number;
   kills: number;
+  deaths?: number;
   parryCount: number;
   damageDealt: number;
+  team?: TeamId;
+  isRaidBoss?: boolean;
+  domainGauge: number;
+  stunImmunityTimer?: number;
+  domainJackpotActive?: boolean;
+  domainJackpotHits?: number;
   dummyDps?: number;
   dummyPeakDps?: number;
   dummyBurstDamage?: number;
@@ -1805,7 +1928,8 @@ export type AwakeningDebugAction =
   | 'awakenP2'
   | 'triggerCutscene'
   | 'setTime89'
-  | 'resetCooldowns';
+  | 'resetCooldowns'
+  | 'fillDomain';
 
 export interface ProjectileState {
   id: string;
@@ -1887,6 +2011,19 @@ export interface CombatEvent {
     | 'silence'
     | 'cometGrab'
     | 'omnislash'
+    | 'domainStart'
+    | 'domainSureHit'
+    | 'domainClashStart'
+    | 'domainClashWin'
+    | 'domainJackpot'
+    | 'domainEnd'
+    | 'kothCapture'
+    | 'craterSlam'
+    | 'crescentSlash'
+    | 'pillarShatter'
+    | 'trenchPulse'
+    | 'chargeAura'
+    | 'skyComboStep'
     | 'ko';
   attackerId?: string;
   targetId?: string;
@@ -1931,6 +2068,7 @@ export interface RoomState {
   hostId: string;
   phase: RoomPhase;
   mapId: MapId;
+  gameMode: GameModeId;
   isSoloPractice: boolean;
   isTrainingMode: boolean;
   trainingConfig?: TrainingConfig;
@@ -1946,6 +2084,7 @@ export interface RoomState {
 export interface ArenaSnapshot {
   serverTime: number;
   matchTime: number;
+  gameMode: GameModeId;
   initialActorCount?: number;
   lastInputSeq: Record<string, number>;
   actors: ArenaActorState[];
@@ -1964,6 +2103,12 @@ export interface ArenaSnapshot {
   awakeningOrbs: AwakeningOrbState[];
   awakeningCutscene: AwakeningCutsceneState | null;
   awakeningBanner: AwakeningBannerState | null;
+  activeDomain?: DomainExpansionState | null;
+  activeDomainClash?: DomainClashState | null;
+  kothZone?: KothZoneState | null;
+  teamScores?: { alpha: number; beta: number } | null;
+  modeTimer?: number | null;
+  raidBossId?: string | null;
 }
 
 export interface RoomChatMessage {
@@ -1977,11 +2122,18 @@ export interface RoomChatMessage {
 
 export type ClientMessage =
   | { type: 'net:ping'; clientSendTime: number }
-  | { type: 'room:create'; playerName: string; isSoloPractice?: boolean; isTrainingMode?: boolean }
+  | {
+      type: 'room:create';
+      playerName: string;
+      isSoloPractice?: boolean;
+      isTrainingMode?: boolean;
+      gameMode?: GameModeId;
+    }
   | { type: 'room:join'; roomCode: string; playerName: string; reconnectToken?: string }
   | { type: 'room:selectFighter'; fighterId: FighterId }
   | { type: 'room:selectSkin'; skinId: SkinId }
   | { type: 'room:selectMap'; mapId: MapId }
+  | { type: 'room:selectMode'; gameMode: GameModeId }
   | { type: 'room:setReady'; ready: boolean }
   | { type: 'room:startNow' }
   | { type: 'room:rematch' }
@@ -2008,6 +2160,8 @@ export type ClientMessage =
   | { type: 'game:awakeningMash'; side?: 'p1' | 'p2' }
   | { type: 'game:awakeningSkip' }
   | { type: 'game:cutsceneSync'; clockSec: number }
+  | { type: 'game:domainActivate' }
+  | { type: 'game:domainClashMash'; side?: 'p1' | 'p2' }
   | { type: 'game:debug'; action: AwakeningDebugAction }
   | {
       type: 'game:ability';

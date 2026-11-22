@@ -100,6 +100,15 @@ export const AwakeningDebugPanel: React.FC<AwakeningDebugPanelProps> = ({
               <RotateCcw className="w-3 h-3" />
               Reset CDs
             </button>
+            <button
+              type="button"
+              data-testid="debug-fill-domain"
+              onClick={() => onAction('fillDomain')}
+              className="col-span-2 flex items-center justify-center gap-1 rounded-lg bg-purple-600/90 hover:bg-purple-500 px-2 py-1.5 text-[10px] font-display font-bold uppercase cursor-pointer border border-purple-300/40"
+            >
+              <Sparkles className="w-3 h-3" />
+              +100% Domain Gauge
+            </button>
           </div>
         </div>
       )}

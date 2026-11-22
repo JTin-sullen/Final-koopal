@@ -7,6 +7,7 @@ import {
   CombatEvent,
   CombatMoveType,
   FighterId,
+  GameModeId,
   MapId,
   RoomChatMessage,
   RoomState,
@@ -71,7 +72,7 @@ import {
   upsertCloudUserOnLogin,
 } from './game/firebaseUsers.ts';
 
-const APP_VERSION = 4;
+const APP_VERSION = 6;
 
 const SCREEN_TINT_STYLES: Record<ScreenTintKind, string> = {
   'high-noon-amber': 'radial-gradient(circle at 50% 42%, rgba(251, 191, 36, 0.26), rgba(180, 83, 9, 0.34) 75%)',
@@ -98,6 +99,7 @@ export default function App() {
   const [screenTint, setScreenTint] = useState<ScreenTintInfo | null>(null);
   const [orbIndicators, setOrbIndicators] = useState<OrbScreenIndicator[]>([]);
   const [selectedSkin, setSelectedSkin] = useState<SkinId>('classic');
+  const [selectedMode, setSelectedMode] = useState<GameModeId>('classic');
   const [shopModal, setShopModal] = useState<{
     open: boolean;
     fighterId?: FighterId;
@@ -212,6 +214,11 @@ export default function App() {
     radius: 3,
     range: 8,
     colorHex: 0x38bdf8,
+  });
+  const cursorWorldRef = useRef<{ x: number; z: number; active: boolean }>({
+    x: 0,
+    z: 0,
+    active: false,
   });
 
   const urlParams = new URLSearchParams(window.location.search);
@@ -352,7 +359,7 @@ export default function App() {
         liveSnapshotRef.current = snap;
         const now = performance.now();
         const me = snap.actors.find((a) => a.playerId === playerIdRef.current);
-        const critSig = `${snap.awakeningPhase}|${snap.activeClash?.id ?? ''}|${snap.activeHeadlock?.id ?? ''}|${snap.awakeningCutscene?.id ?? ''}|${snap.awakeningCutscene?.resolved ?? ''}|${snap.awakeningBanner?.id ?? ''}|${snap.obstacles?.length ?? 0}|${me?.isKO ?? false}|${me?.awakened ?? false}`;
+        const critSig = `${snap.awakeningPhase}|${snap.activeClash?.id ?? ''}|${snap.activeHeadlock?.id ?? ''}|${snap.awakeningCutscene?.id ?? ''}|${snap.awakeningCutscene?.resolved ?? ''}|${snap.awakeningBanner?.id ?? ''}|${snap.activeDomain?.id ?? ''}|${snap.activeDomainClash?.id ?? ''}|${snap.gameMode}|${snap.kothZone?.controllerId ?? ''}|${snap.teamScores?.alpha ?? 0}-${snap.teamScores?.beta ?? 0}|${snap.obstacles?.length ?? 0}|${me?.isKO ?? false}|${me?.awakened ?? false}`;
         if (
           critSig !== lastCriticalSigRef.current ||
           shouldThrottleUpdate(now, lastHudSnapMsRef.current, 12)
@@ -802,9 +809,10 @@ export default function App() {
 
   const handleCreateRoom = (
     name: string,
-    opts?: { isSoloPractice?: boolean; isTrainingMode?: boolean }
+    opts?: { isSoloPractice?: boolean; isTrainingMode?: boolean; gameMode?: GameModeId }
   ) => {
     const isLocalMode = Boolean(opts?.isSoloPractice || opts?.isTrainingMode);
+    const chosenMode: GameModeId = opts?.isTrainingMode ? 'classic' : opts?.gameMode ?? selectedMode;
     const gate = canEnterArena({
       isPlaceholderConfig,
       hasCloudUser: Boolean(cloudUser),
@@ -826,6 +834,7 @@ export default function App() {
         playerName: name,
         isSoloPractice: Boolean(opts?.isSoloPractice),
         isTrainingMode: Boolean(opts?.isTrainingMode),
+        gameMode: chosenMode,
       });
       return;
     }
@@ -838,6 +847,7 @@ export default function App() {
       playerName: name,
       isSoloPractice: false,
       isTrainingMode: false,
+      gameMode: chosenMode,
     });
   };
 
@@ -1059,7 +1069,12 @@ export default function App() {
 
   const handleCanvasAttack = useCallback(
     (shiftHeld: boolean) => {
-      handleCastAbility(0, shiftHeld);
+      const cw = cursorWorldRef.current;
+      if (cw.active) {
+        handleCastAbility(0, shiftHeld, { aimX: cw.x, aimZ: cw.z });
+      } else {
+        handleCastAbility(0, shiftHeld);
+      }
     },
     [handleCastAbility]
   );
@@ -1071,6 +1086,14 @@ export default function App() {
   const handleToggleLockOn = useCallback(() => {
     setLockOnEnabled((v) => !v);
   }, []);
+
+  const handleDomainActivate = useCallback(() => {
+    sendMsg({ type: 'game:domainActivate' });
+  }, [sendMsg]);
+
+  const handleDomainClashMash = useCallback(() => {
+    sendMsg({ type: 'game:domainClashMash' });
+  }, [sendMsg]);
 
   const handleOpenAdminMonitor = useCallback(() => {
     setShowAdminMonitor(true);
@@ -1096,10 +1119,10 @@ export default function App() {
   }, [sendMsg]);
 
   const handleAwakeningSkip = useCallback(() => {
-    janeCutsceneAudio.rampFadeOut(0.45);
-    soundEngine.setDucking(false);
-    cutsceneMusicActiveRef.current = false;
-    cutsceneDirectorRef.current = null;
+    const clashAt = AWAKENING_CONFIG.TIMELINE.CLASH_START_AT;
+    janeCutsceneAudio.seekTo(clashAt);
+    cutsceneFallbackStartRef.current = performance.now() - clashAt * 1000;
+    soundEngine.play('clashBoom');
     sendMsg({ type: 'game:awakeningSkip' });
   }, [sendMsg]);
 
@@ -1278,6 +1301,8 @@ export default function App() {
           onOpenFirebaseGuide={() => setShowFirebaseGuide(true)}
           onLoginAccount={handleLoginAccount}
           onLogoutAccount={handleLogoutAccount}
+          selectedMode={selectedMode}
+          onSelectMode={setSelectedMode}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
           onOpenCinemaCut={() => setViewMode('cinema')}
@@ -1315,6 +1340,7 @@ export default function App() {
             sendMsg({ type: 'room:selectSkin', skinId });
           }}
           onSelectMap={(mapId: MapId) => sendMsg({ type: 'room:selectMap', mapId })}
+          onSelectMode={(gameMode: GameModeId) => sendMsg({ type: 'room:selectMode', gameMode })}
           onToggleReady={(ready: boolean) => sendMsg({ type: 'room:setReady', ready })}
           onStartNow={() => sendMsg({ type: 'room:startNow' })}
           onOpenShop={handleOpenShop}
@@ -1340,6 +1366,7 @@ export default function App() {
             jitterMsRef={jitterMsRef}
             localControlRef={localControlRef}
             aimPreviewRef={aimPreviewRef}
+            cursorWorldRef={cursorWorldRef}
             isLocalMatch={isLocalMatch}
             onPerfStats={handlePerfStats}
             onCanvasAttack={handleCanvasAttack}
@@ -1377,6 +1404,7 @@ export default function App() {
             lockOnEnabled={lockOnEnabled}
             cameraYawRef={cameraYawRef}
             aimPreviewRef={aimPreviewRef}
+            cursorWorldRef={cursorWorldRef}
             cancelAimTriggerSeq={cancelAimTriggerSeq}
             damagePopups={damagePopups}
             hitFlash={hitFlash}
@@ -1393,6 +1421,8 @@ export default function App() {
             onToggleFlight={handleToggleFlight}
             onDash={handleDash}
             onGrab={handleGrab}
+            onDomainActivate={handleDomainActivate}
+            onDomainClashMash={handleDomainClashMash}
             onClashPick={handleClashPick}
             onBlockHoldChange={handleBlockHoldChange}
             onCastAbility={handleCastAbility}

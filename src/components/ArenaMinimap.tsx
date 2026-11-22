@@ -3,7 +3,9 @@ import {
   ArenaActorState,
   ArenaPickup,
   AwakeningOrbState,
+  DomainExpansionState,
   FIGHTER_BY_ID,
+  KothZoneState,
   MAP_BY_ID,
   MapId,
   ObstacleState,
@@ -18,6 +20,8 @@ interface ArenaMinimapProps {
   obstacles?: ObstacleState[];
   pickups?: ArenaPickup[];
   awakeningOrbs?: AwakeningOrbState[];
+  kothZone?: KothZoneState | null;
+  activeDomain?: DomainExpansionState | null;
   stormActive: boolean;
   stormRadius: number;
   compact?: boolean;
@@ -31,6 +35,8 @@ export const ArenaMinimap: React.FC<ArenaMinimapProps> = React.memo(({
   obstacles = [],
   pickups = [],
   awakeningOrbs = [],
+  kothZone = null,
+  activeDomain = null,
   stormActive,
   stormRadius,
   compact = false,
@@ -38,6 +44,8 @@ export const ArenaMinimap: React.FC<ArenaMinimapProps> = React.memo(({
   const arenaRadius = MAP_BY_ID[mapId].arenaRadius;
   const sizePx = compact ? 76 : 104;
   const stormPct = Math.max(8, Math.min(88, (stormRadius / Math.max(10, arenaRadius)) * 88));
+  const domainPt = activeDomain ? projectToMinimapPercent(activeDomain.centerX, activeDomain.centerZ, arenaRadius) : null;
+  const kothPt = kothZone ? projectToMinimapPercent(kothZone.x, kothZone.z, arenaRadius) : null;
 
   return (
     <div
@@ -66,6 +74,32 @@ export const ArenaMinimap: React.FC<ArenaMinimapProps> = React.memo(({
             width: '88%',
             height: '88%',
             transform: `translate(-50%, -50%) scale(${Math.max(0.08, stormPct / 88)})`,
+          }}
+        />
+      )}
+
+      {/* KOTH Hill Capture Circle */}
+      {kothZone && kothPt && (
+        <div
+          className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-amber-500 bg-amber-400/25"
+          style={{
+            left: `${kothPt.leftPct}%`,
+            top: `${kothPt.topPct}%`,
+            width: `${Math.max(18, Math.round((kothZone.radius / Math.max(10, arenaRadius)) * 88))}%`,
+            height: `${Math.max(18, Math.round((kothZone.radius / Math.max(10, arenaRadius)) * 88))}%`,
+          }}
+        />
+      )}
+
+      {/* Active Domain Expansion Barrier */}
+      {activeDomain && domainPt && (
+        <div
+          className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-purple-500 bg-purple-500/15 animate-pulse"
+          style={{
+            left: `${domainPt.leftPct}%`,
+            top: `${domainPt.topPct}%`,
+            width: `${Math.max(22, Math.round((activeDomain.radius / Math.max(10, arenaRadius)) * 88))}%`,
+            height: `${Math.max(22, Math.round((activeDomain.radius / Math.max(10, arenaRadius)) * 88))}%`,
           }}
         />
       )}
